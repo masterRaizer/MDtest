@@ -6,7 +6,7 @@ Header-only библиотека на C++17 для анализа структу
 | # | Модуль | Статус |
 |---|---|---|
 | 1 | **Поиск сигнатур**: адреса функций и глобальных переменных, которые не нужно обновлять вручную после каждого обновления бинарника | готов |
-| 2 | **Маппинг имён**: числовые ID объектов из памяти → строки из таблицы имён | следующий |
+| 2 | **Generic Data Resolver**: числовые ID объектов из памяти → читаемые имена (массивы, хеш-таблицы, словари; UTF-8/UTF-16) | готов |
 | 3 | **Доступ к свойствам по строковым ключам**: смещения полей вычисляются по описаниям структур | следующий |
 
 ---
@@ -167,36 +167,6 @@ memrefl::SignatureScanner scanner(memrefl::MemoryRegion::Snapshot(copy.data(), c
 кеше (256 КБ), фильтр выдаёт 22–26 ГБ/с. Для модуля размером в десятки мегабайт
 поиск одной сигнатуры занимает единицы миллисекунд.
 
-### Сборка и тесты
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-```
-
-```bash
-cmake --build build -j && ctest --test-dir build --output-on-failure
-```
-
-```bash
-./build/scan_demo && ./build/scan_benchmark
-```
-
-Тесты собираются дважды: `signature_scanner_tests` проходит путь SSE2,
-`signature_scanner_tests_scalar` — запасной путь через `memchr`. Главный тест
-сравнивает сканер с наивным эталоном на 4000 случайных буферах и паттернах. В них
-есть маски по краям, полубайтовые маски и размеры меньше и больше SIMD-блока.
-Кроме того, тесты проверяют разбор синтетических PE32/PE32+ (в том числе
-повреждённых заголовков) и поиск в собственном процессе.
-
-Проверка выхода за границы буфера:
-
-```bash
-cmake -S . -B build-asan -DMEMREFL_SANITIZE=address && cmake --build build-asan -j && ./build-asan/signature_scanner_tests
-```
-
-Под ASan тест сканирования собственного модуля пропускается. Он намеренно читает
-`.rodata` целиком, включая «красные зоны» ASan вокруг глобальных переменных.
-
 ### Ограничения
 
 * Сигнатура описывает конкретную сборку компилятора. Если изменились сами
@@ -208,3 +178,193 @@ cmake -S . -B build-asan -DMEMREFL_SANITIZE=address && cmake --build build-asan 
   на Linux — первая запись `dl_iterate_phdr`). Поиск в буферах и разбор PE
   работают на любой little-endian платформе.
 * Регионы, переданные сканеру, не должны перекрываться.
+
+---
+
+## Модуль 2: Generic Data Resolver
+
+Внутри программы объекты ссылаются на имена числами: индексом в таблице строк,
+хешем имени или упакованным ID с флагами. Resolver переводит такие ID в
+читаемые строки для отчётов и аналитики.
+
+```
+ ID из памяти ──KeyConverter──▶ LookupKey{value, hash} ──NameTable──▶ запись строки ──StringFormat──▶ UTF-8
+   0x0000000B    BitField(1)        {5, 5}                 массив[5]      {char16_t*, len}     "Камера"
+```
+
+Каждое звено настраивается независимо, поэтому одни и те же классы подходят для
+разных программ. Раскладка таблицы описывается данными (`*Spec`), без
+наследования и перекомпиляции.
+
+### Тип маппинга
+
+Тип выбирается спецификацией `MappingSpec = std::variant<ArrayTableSpec, HashTableSpec, DictionarySpec>`
+или готовой реализацией `NameTable`:
+
+| Таблица | Где живёт | Ключ | Варианты раскладки |
+|---|---|---|---|
+| `ArrayNameTable` (`ArrayTableSpec`) | память цели | индекс | плоский массив или блоки (`chunk_capacity`); элемент — указатель на запись или сама запись (`element_is_pointer`, `element_size`, `element_offset`); число элементов известно, читается из поля или не ограничено |
+| `HashNameTable` (`HashTableSpec`) | память цели | `value` для сравнения, `hash` для корзины | цепочки (`next_offset`) или линейное пробирование (`slot_size`, `empty_key`, `deleted_key`); корзина `hash % n` или `hash & (n-1)` |
+| `DictionaryNameTable` (`DictionarySpec`) | у нас | хеш имени | имена хешируются как в программе (FNV-1/FNV-1a/CRC32, байты UTF-8/UTF-16/Latin-1, без учёта регистра); можно задать явные пары `ключ → имя` |
+| `FallbackNameTable` | — | — | цепочка таблиц: например, живая таблица процесса, затем словарь известных имён |
+
+Адреса таблиц задаются через `PointerPath`. Это либо адрес, либо цепочка
+указателей (`PointerPath(g_registry, {0})`, то есть `*g_registry`), которая
+перечитывается при каждом обращении. Если массив в живом процессе
+перевыделили, resolver прочитает его новый адрес и не обратится к
+освобождённой памяти. Ширина указателей цели (`pointer_size`) задаётся явно,
+поэтому 64-битный инструмент читает и 32-битную цель.
+
+### Конвертер ключей
+
+| Конвертер | Когда | Результат |
+|---|---|---|
+| `KeyConverter::Direct()` | ID — индекс или уже хеш имени | `value = hash = id` |
+| `KeyConverter::BitField(shift, mask, bias)` | индекс упакован с флагами или нумерация с 1 | `value = hash = ((id >> shift) & mask) + bias` |
+| `KeyConverter::HashedId(algorithm, bytes)` | хеш-таблица хеширует числовой ключ перед выбором корзины | `value = id`, `hash = H(байты id)` |
+| `KeyConverter::Custom(fn)` | любая своя логика; `nullopt` отклоняет ID | что вернёт `fn` |
+| `a.Then(b)` | композиция | `b` применяется к `value` от `a` |
+
+### Строки и кодировки
+
+`StringFormat` описывает, как прочитать строку из записи, на которую указывает
+таблица:
+
+| Раскладка в памяти | Настройка |
+|---|---|
+| `const char*` / `const wchar_t*` с нулём в конце | `encoding`, остальное по умолчанию |
+| `{uint16 len; char chars[]}` | `length_size = 2`, `chars_offset = 2` |
+| `{const char16_t* data; int32 length}` (длина может включать `\0`) | `chars_by_pointer = true`, `length_offset = 8`, `length_size = 4`, `encoding = Utf16LE` |
+| `uint16 header`: бит 0 — «широкая» строка, длина в битах 6..15 | `length_size = 2`, `length_shift = 6`, `utf16_flag_mask = 1`, `chars_offset = 2` |
+| что-то особенное | свой `StringDecoder` вместо `StringFormat` |
+
+Все строки на выходе — корректный UTF-8. Источник может быть в одной из трёх
+кодировок:
+
+* **UTF-8** проверяется по таблице 3-7 стандарта Unicode: overlong-формы,
+  суррогаты и значения больше U+10FFFF не принимаются. Каждая битая
+  последовательность заменяется одним U+FFFD по правилу «максимальной части»,
+  как в браузерах и ICU.
+* **UTF-16LE**: суррогатные пары собираются, одиночный суррогат заменяется на U+FFFD.
+* **Latin-1** («ANSI»): байт — это кодовая точка U+00..U+FF.
+
+Так мусор из памяти не ломает CSV, JSON и консоль. Для Windows API есть
+`Utf8ToWide`. `std::codecvt` не используется: в C++17 он устарел.
+
+### Чтение памяти
+
+| Читатель | Назначение |
+|---|---|
+| `ProcessMemoryReader::Self()` | свой процесс, **безопасно**: `ReadProcessMemory` / `process_vm_readv` возвращают ошибку на невалидном адресе, а не роняют процесс |
+| `ProcessMemoryReader(handle)` / `(pid)` | другой процесс: нужен `PROCESS_VM_READ` на Windows или ptrace-доступ на Linux (учитывайте `kernel.yama.ptrace_scope`) |
+| `RegionReader` | снимки и дампы (`MemoryRegion` из модуля 1), офлайн-анализ, тесты |
+| свой `MemoryReader` | например, чтение по сети или из файла ядра |
+
+Строки с завершающим нулём читаются блоками, которые не пересекают границу
+4 КБ-страницы. Поэтому строка в самом конце последней доступной страницы
+читается без ошибки. Длина строки (`max_chars`), число элементов
+(`max_count`), длина цепочек и число проб (`max_chain`) ограничены сверху. Даже
+повреждённая или зацикленная таблица даёт `nullopt`, а не зависание или
+падение.
+
+### Resolver
+
+| Метод | Назначение |
+|---|---|
+| `Resolve(id)` | `std::optional<std::string>` — имя или «нет имени» |
+| `Label(id)` / `Labels(ids)` | всегда строка: имя или `<unknown:0x1A2B>` (формат настраивается через `fallback_label`) |
+| `ForEachName(visitor)` | выгрузить всю таблицу; ключи — ключи таблицы |
+| `ExportDictionary()` | снимок таблицы в локальный словарь: имена остаются доступны после завершения процесса |
+| `stats()` | `lookups = cache_hits + resolved + unresolved`, отдельно `rejected` конвертером |
+| `ClearCache()` | сброс кеша |
+
+Найденные имена кешируются. Промахи по умолчанию не кешируются, потому что в
+живом процессе имя может появиться позже; это включается через
+`ResolverOptions::cache_misses`. `Resolve` можно вызывать из нескольких
+потоков: память читается без блокировки, а кеш защищён `shared_mutex`.
+
+### Пример
+
+```cpp
+#include "memrefl/data_resolver.hpp"
+
+auto reader = std::make_shared<memrefl::ProcessMemoryReader>(memrefl::ProcessMemoryReader::Self());
+
+// Типы: глобальный указатель g_TypeRegistry -> {const char** names; uint32 count},
+// ID = (индекс << 1) | флаг. type_registry_address = &g_TypeRegistry (например, из модуля 1).
+memrefl::ArrayTableSpec types;
+types.array = memrefl::PointerPath(type_registry_address, {0, 0});   // *(*g_TypeRegistry).names
+types.count_field = memrefl::PointerPath(type_registry_address, {8});  // &(*g_TypeRegistry).count
+memrefl::GenericDataResolver type_names(reader, types, memrefl::KeyConverter::BitField(1, ~0ull));
+
+// Свойства: ID = CRC32 имени в нижнем регистре; таблицы в памяти нет, есть список имён.
+memrefl::DictionarySpec known;
+known.hashing = {memrefl::HashAlgorithm::Crc32, memrefl::Encoding::Utf8, /*ascii_lowercase=*/true};
+known.names = LoadLines("property_names.txt");
+memrefl::GenericDataResolver property_names(nullptr, known);
+
+for (const Object& object : objects)
+    report << type_names.Label(object.type_id) << ',' << property_names.Label(object.property_id) << '\n';
+```
+
+Полный пример — `examples/resolver_demo.cpp`. Он разбирает живые структуры
+собственного процесса: массив UTF-8 имён с упакованными ID и хеш-таблицу
+UTF-16 имён с цепочками. Для отсутствующих свойств используется словарь, для
+неизвестных ID — подпись `<unknown:…>`.
+
+### Ограничения
+
+* Раскладку таблицы (смещения, ширину ключей) нужно знать заранее. Её
+  определяют при исследовании программы, а сами адреса таблиц удобно находить
+  сигнатурами из модуля 1.
+* `ProcessMemoryReader` делает системный вызов на каждое чтение. Для
+  многократного разбора больших таблиц выгодно один раз снять
+  `ExportDictionary()` или читать снимок через `RegionReader`.
+* Чтение живого процесса не атомарно: таблица может меняться во время чтения.
+  Защита от мусора и циклов гарантирует только отсутствие падений и зависаний,
+  но не согласованность снимка.
+* Разбор рассчитан на little-endian цели (x86, x86-64, ARM).
+
+---
+
+## Сборка и тесты
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
+
+```bash
+cmake --build build -j && ctest --test-dir build --output-on-failure
+```
+
+```bash
+./build/scan_demo && ./build/scan_benchmark && ./build/resolver_demo
+```
+
+* `signature_scanner_tests` и `signature_scanner_tests_scalar` — модуль 1 с SSE2 и
+  без него. Главный тест сравнивает сканер с наивным эталоном на 4000 случайных
+  буферах и паттернах: маски по краям, полубайтовые маски, размеры меньше и
+  больше SIMD-блока. Кроме того, проверяется разбор синтетических PE32/PE32+, в
+  том числе с повреждёнными заголовками, и поиск в собственном процессе.
+* `data_resolver_tests` — модуль 2:
+  * кодировки (битые UTF-8, одиночные суррогаты, Latin-1) и эталонные значения хешей;
+  * все раскладки строк, массивов и хеш-таблиц, включая 32-битные указатели,
+    перевыделение массива, зацикленные цепочки и «надгробия»;
+  * кеш, статистика и одновременные `Resolve` из 4 потоков;
+  * безопасное чтение собственного процесса: мусорный указатель в таблице и
+    строка у границы недоступной страницы.
+
+Санитайзеры:
+
+```bash
+cmake -S . -B build-asan -DMEMREFL_SANITIZE=address && cmake --build build-asan -j && ctest --test-dir build-asan
+```
+
+```bash
+cmake -S . -B build-tsan -DMEMREFL_SANITIZE=thread && cmake --build build-tsan -j && ./build-tsan/data_resolver_tests
+```
+
+Под ASan тест сканирования собственного модуля пропускается. Он намеренно читает
+`.rodata` целиком, включая «красные зоны» ASan вокруг глобальных переменных.
+Под Wine пропускаются проверки границы недоступной страницы: Wine, в отличие от
+Windows, позволяет `ReadProcessMemory` читать страницы `PAGE_NOACCESS`.

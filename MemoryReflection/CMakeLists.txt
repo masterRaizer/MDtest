@@ -5,10 +5,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(MEMREFL_SANITIZE "" CACHE STRING "Sanitizer for tests/examples: address, undefined or empty")
+set(MEMREFL_SANITIZE "" CACHE STRING "Sanitizer for tests/examples: address, undefined, thread or empty")
+
+find_package(Threads REQUIRED)
 
 add_library(memrefl INTERFACE)
 target_include_directories(memrefl INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(memrefl INTERFACE Threads::Threads)
 
 function(memrefl_target name source)
   add_executable(${name} ${source})
@@ -26,6 +29,7 @@ endfunction()
 
 memrefl_target(scan_demo examples/scan_demo.cpp)
 memrefl_target(scan_benchmark examples/scan_benchmark.cpp)
+memrefl_target(resolver_demo examples/resolver_demo.cpp)
 
 enable_testing()
 memrefl_target(signature_scanner_tests tests/signature_scanner_tests.cpp)
@@ -35,3 +39,6 @@ add_test(NAME signature_scanner_tests COMMAND signature_scanner_tests)
 memrefl_target(signature_scanner_tests_scalar tests/signature_scanner_tests.cpp)
 target_compile_definitions(signature_scanner_tests_scalar PRIVATE MEMREFL_NO_SIMD)
 add_test(NAME signature_scanner_tests_scalar COMMAND signature_scanner_tests_scalar)
+
+memrefl_target(data_resolver_tests tests/data_resolver_tests.cpp)
+add_test(NAME data_resolver_tests COMMAND data_resolver_tests)

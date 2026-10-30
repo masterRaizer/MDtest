@@ -73,6 +73,44 @@ struct MemoryRegion {
   }
 };
 
+// Сортирует регионы по адресу, отбрасывает пустые и склеивает смежные (и по
+// адресу в цели, и по расположению байтов у нас). Регионы не должны перекрываться.
+inline std::vector<MemoryRegion> NormalizeRegions(std::vector<MemoryRegion> regions) {
+  regions.erase(std::remove_if(regions.begin(), regions.end(),
+                               [](const MemoryRegion& r) { return r.size == 0 || r.data == nullptr; }),
+                regions.end());
+  std::sort(regions.begin(), regions.end(),
+            [](const MemoryRegion& a, const MemoryRegion& b) { return a.base < b.base; });
+  std::vector<MemoryRegion> merged;
+  for (const MemoryRegion& r : regions) {
+    if (!merged.empty()) {
+      MemoryRegion& last = merged.back();
+      const bool contiguous =
+          last.base + last.size == r.base &&
+          reinterpret_cast<std::uintptr_t>(last.data) + last.size == reinterpret_cast<std::uintptr_t>(r.data);
+      if (contiguous) {
+        last.size += r.size;
+        continue;
+      }
+    }
+    merged.push_back(r);
+  }
+  return merged;
+}
+
+// Регион из нормализованного списка, целиком содержащий [address, address + size).
+inline const MemoryRegion* FindRegion(const std::vector<MemoryRegion>& regions, std::uintptr_t address,
+                                      std::size_t size) noexcept {
+  // Первый регион, начинающийся строго после address; нужный — перед ним.
+  const auto it = std::upper_bound(regions.begin(), regions.end(), address,
+                                   [](std::uintptr_t a, const MemoryRegion& r) { return a < r.base; });
+  if (it == regions.begin()) return nullptr;
+  const MemoryRegion& region = *std::prev(it);
+  const std::uintptr_t offset = address - region.base;
+  if (offset >= region.size || size > region.size - offset) return nullptr;
+  return &region;
+}
+
 namespace detail {
 
 // Все функции сканирования получают count — число допустимых позиций начала
@@ -188,29 +226,9 @@ class SignatureScanner {
   explicit SignatureScanner(MemoryRegion region)
       : SignatureScanner(std::vector<MemoryRegion>{region}) {}
 
-  // Регионы сортируются по адресу, пустые отбрасываются, смежные (и по адресу
-  // в цели, и по расположению байтов у нас) склеиваются. Регионы не должны
-  // перекрываться.
-  explicit SignatureScanner(std::vector<MemoryRegion> regions) {
-    regions.erase(std::remove_if(regions.begin(), regions.end(),
-                                 [](const MemoryRegion& r) { return r.size == 0 || r.data == nullptr; }),
-                  regions.end());
-    std::sort(regions.begin(), regions.end(),
-              [](const MemoryRegion& a, const MemoryRegion& b) { return a.base < b.base; });
-    for (const MemoryRegion& r : regions) {
-      if (!regions_.empty()) {
-        MemoryRegion& last = regions_.back();
-        const bool contiguous =
-            last.base + last.size == r.base &&
-            reinterpret_cast<std::uintptr_t>(last.data) + last.size == reinterpret_cast<std::uintptr_t>(r.data);
-        if (contiguous) {
-          last.size += r.size;
-          continue;
-        }
-      }
-      regions_.push_back(r);
-    }
-  }
+  // Регионы нормализуются (см. NormalizeRegions).
+  explicit SignatureScanner(std::vector<MemoryRegion> regions)
+      : regions_(NormalizeRegions(std::move(regions))) {}
 
   const std::vector<MemoryRegion>& regions() const noexcept { return regions_; }
   bool empty() const noexcept { return regions_.empty(); }
@@ -307,14 +325,7 @@ class SignatureScanner {
 
  private:
   const MemoryRegion* RegionFor(std::uintptr_t address, std::size_t size) const noexcept {
-    // Первый регион, начинающийся строго после address; нужный — перед ним.
-    const auto it = std::upper_bound(regions_.begin(), regions_.end(), address,
-                                     [](std::uintptr_t a, const MemoryRegion& r) { return a < r.base; });
-    if (it == regions_.begin()) return nullptr;
-    const MemoryRegion& region = *std::prev(it);
-    const std::uintptr_t offset = address - region.base;
-    if (offset >= region.size || size > region.size - offset) return nullptr;
-    return &region;
+    return FindRegion(regions_, address, size);
   }
 
   std::vector<MemoryRegion> regions_;  // по возрастанию base, без перекрытий
