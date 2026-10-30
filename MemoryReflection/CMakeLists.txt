@@ -46,3 +46,7 @@ add_test(NAME data_resolver_tests COMMAND data_resolver_tests)
 
 memrefl_target(property_fetcher_tests tests/property_fetcher_tests.cpp)
 add_test(NAME property_fetcher_tests COMMAND property_fetcher_tests)
+
+# Сборка проверяет, что заголовки не ломаются макросами <windows.h> (min/max и др.).
+memrefl_target(windows_macros_check tests/windows_macros_check.cpp)
+add_test(NAME windows_macros_check COMMAND windows_macros_check)

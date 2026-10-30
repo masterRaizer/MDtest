@@ -87,9 +87,9 @@ void TestResultAndConversions() {
   CHECK(Fails(ConvertValue<std::int8_t>(minus), FetchErrorCode::ValueOutOfRange));
   CHECK(Fails(ConvertValue<unsigned>(minus), FetchErrorCode::ValueOutOfRange));
   CHECK(ConvertValue<double>(minus).value() == -129.0);
-  const PropertyValue big = std::numeric_limits<std::uint64_t>::max();
+  const PropertyValue big = (std::numeric_limits<std::uint64_t>::max)();
   CHECK(Fails(ConvertValue<std::int64_t>(big), FetchErrorCode::ValueOutOfRange));
-  CHECK(ConvertValue<std::uint64_t>(big).value() == std::numeric_limits<std::uint64_t>::max());
+  CHECK(ConvertValue<std::uint64_t>(big).value() == (std::numeric_limits<std::uint64_t>::max)());
   const PropertyValue real = 2.5;
   CHECK(ConvertValue<float>(real).value() == 2.5f);
   CHECK(Fails(ConvertValue<int>(real), FetchErrorCode::TypeMismatch));

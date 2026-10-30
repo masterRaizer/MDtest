@@ -104,7 +104,7 @@ inline Result<std::vector<PathSegment>> ParsePropertyPath(std::string_view path)
       const std::size_t digits = ++i;
       std::size_t index = 0;
       for (; i < path.size() && path[i] >= '0' && path[i] <= '9'; ++i) {
-        if (index > (std::numeric_limits<std::size_t>::max() - 9) / 10) return fail(digits, "index is too large");
+        if (index > ((std::numeric_limits<std::size_t>::max)() - 9) / 10) return fail(digits, "index is too large");
         index = index * 10 + static_cast<std::size_t>(path[i] - '0');
       }
       if (i == digits) return fail(i, "expected array index");
@@ -128,7 +128,7 @@ inline std::size_t EditDistance(std::string_view a, std::string_view b) {
     row[0] = i;
     for (std::size_t j = 1; j <= b.size(); ++j) {
       const std::size_t above = row[j];
-      row[j] = std::min({row[j] + 1, row[j - 1] + 1, diagonal + (a[i - 1] == b[j - 1] ? 0 : 1)});
+      row[j] = (std::min)({row[j] + 1, row[j - 1] + 1, diagonal + (a[i - 1] == b[j - 1] ? 0 : 1)});
       diagonal = above;
     }
   }
@@ -172,15 +172,15 @@ Result<T> ConvertValue(const PropertyValue& value, std::string_view what = "valu
   } else if constexpr (std::is_integral_v<T>) {
     using Limits = std::numeric_limits<T>;
     if (const std::int64_t* s = std::get_if<std::int64_t>(&value)) {
-      const bool fits = std::is_signed_v<T> ? (*s >= static_cast<std::int64_t>(Limits::min()) &&
-                                               *s <= static_cast<std::int64_t>(Limits::max()))
+      const bool fits = std::is_signed_v<T> ? (*s >= static_cast<std::int64_t>((Limits::min)()) &&
+                                               *s <= static_cast<std::int64_t>((Limits::max)()))
                                             : (*s >= 0 && static_cast<std::uint64_t>(*s) <=
-                                                              static_cast<std::uint64_t>(Limits::max()));
+                                                              static_cast<std::uint64_t>((Limits::max)()));
       if (!fits) return out_of_range();
       return static_cast<T>(*s);
     }
     if (const std::uint64_t* u = std::get_if<std::uint64_t>(&value)) {
-      if (*u > static_cast<std::uint64_t>(Limits::max())) return out_of_range();
+      if (*u > static_cast<std::uint64_t>((Limits::max)())) return out_of_range();
       return static_cast<T>(*u);
     }
     return mismatch();
@@ -477,7 +477,7 @@ class PropertyFetcher {
 
   FetchError UnknownProperty(const TypeView& view, const std::string& name) const {
     std::string message = "type '" + view.name + "' has no property '" + name + "'";
-    std::size_t best = std::numeric_limits<std::size_t>::max();
+    std::size_t best = (std::numeric_limits<std::size_t>::max)();
     std::string suggestion;
     for (const auto& entry : view.All()) {
       const std::size_t distance = detail::EditDistance(name, entry.first->name);

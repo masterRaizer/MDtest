@@ -398,12 +398,12 @@ void TestArrayTableLiveLayouts() {
 
   // Записи прямо в массиве: {uint8 length; char chars[15]}; длина массива неизвестна —
   // перебор идёт до конца читаемой памяти.
-  FakeMemory small(3 * 16);
-  const std::uintptr_t inline_array = small.Alloc(3 * 16);
+  FakeMemory compact(3 * 16);
+  const std::uintptr_t inline_array = compact.Alloc(3 * 16);
   const char* words[] = {"one", "two", "three"};
   for (int i = 0; i < 3; ++i) {
-    small.Put<std::uint8_t>(inline_array + i * 16, static_cast<std::uint8_t>(std::strlen(words[i])));
-    small.Write(inline_array + i * 16 + 1, words[i], std::strlen(words[i]));
+    compact.Put<std::uint8_t>(inline_array + i * 16, static_cast<std::uint8_t>(std::strlen(words[i])));
+    compact.Write(inline_array + i * 16 + 1, words[i], std::strlen(words[i]));
   }
   ArrayTableSpec inline_spec;
   inline_spec.array = inline_array;
@@ -411,7 +411,7 @@ void TestArrayTableLiveLayouts() {
   inline_spec.element_size = 16;
   inline_spec.string.length_size = 1;
   inline_spec.string.chars_offset = 1;
-  const ArrayNameTable inline_table(small.Reader(), inline_spec);
+  const ArrayNameTable inline_table(compact.Reader(), inline_spec);
   CHECK(inline_table.Lookup({2, 2}) == std::string("three"));
   CHECK(!inline_table.Lookup({3, 3}));
   std::vector<std::string> listed;

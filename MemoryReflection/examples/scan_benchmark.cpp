@@ -42,7 +42,7 @@ std::vector<std::uint8_t> CollectCodeBytes() {
   const std::size_t unique = code.size();
   while (code.size() < kTargetBytes) {
     const std::size_t old_size = code.size();
-    const std::size_t chunk = std::min(unique, kTargetBytes - old_size);
+    const std::size_t chunk = (std::min)(unique, kTargetBytes - old_size);
     code.resize(old_size + chunk);
     std::copy_n(code.begin(), chunk, code.begin() + static_cast<std::ptrdiff_t>(old_size));
   }
@@ -61,7 +61,7 @@ double BestSeconds(F&& run) {
   for (int i = 0; i < 3; ++i) {
     const auto start = std::chrono::steady_clock::now();
     run();
-    best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+    best = (std::min)(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
   }
   return best;
 }

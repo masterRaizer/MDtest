@@ -97,7 +97,7 @@ inline bool ReadTerminated(const MemoryReader& reader, std::uintptr_t address, s
   unsigned char buffer[kChunk];
   std::uintptr_t cursor = address;
   for (;;) {
-    std::size_t want = std::min(kChunk, kPage - static_cast<std::size_t>(cursor % kPage));
+    std::size_t want = (std::min)(kChunk, kPage - static_cast<std::size_t>(cursor % kPage));
     want -= want % unit;
     if (want == 0 || !reader.ReadBytes(cursor, buffer, want)) {
       want = unit;
@@ -256,7 +256,7 @@ class ArrayNameTable final : public NameTable {
 
   // Текущая граница индексов.
   std::size_t Count() const {
-    if (spec_.count != 0) return std::min(spec_.count, spec_.max_count);
+    if (spec_.count != 0) return (std::min)(spec_.count, spec_.max_count);
     if (spec_.count_field) {
       const std::optional<std::uintptr_t> field = spec_.count_field->Resolve(*reader_, spec_.pointer_size);
       const std::optional<std::uint64_t> value = field ? reader_->ReadUnsigned(*field, spec_.count_size) : std::nullopt;
@@ -366,7 +366,7 @@ class HashNameTable final : public NameTable {
     }
 
     const std::uint64_t empty = detail::KeyBits(spec_.empty_key, spec_.key_size);
-    const std::size_t probes = std::min(count, spec_.max_chain);
+    const std::size_t probes = (std::min)(count, spec_.max_chain);
     for (std::size_t probe = 0; probe < probes; ++probe) {
       const std::uintptr_t slot = *buckets + ((bucket + probe) % count) * spec_.slot_size;
       const std::optional<std::uint64_t> stored = reader_->ReadUnsigned(slot + spec_.key_offset, spec_.key_size);

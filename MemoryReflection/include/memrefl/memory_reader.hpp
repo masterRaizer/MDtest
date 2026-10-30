@@ -70,7 +70,7 @@ class MemoryReader {
   // (например, WOW64-процесс, читаемый 64-битным инструментом).
   std::optional<std::uintptr_t> ReadPointer(std::uintptr_t address, std::size_t pointer_size = sizeof(void*)) const {
     const std::optional<std::uint64_t> value = ReadUnsigned(address, pointer_size);
-    if (!value || *value > std::numeric_limits<std::uintptr_t>::max()) return std::nullopt;
+    if (!value || *value > (std::numeric_limits<std::uintptr_t>::max)()) return std::nullopt;
     return static_cast<std::uintptr_t>(*value);
   }
 };
