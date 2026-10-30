@@ -1,0 +1,1 @@
+/usr/bin/c++ -O2 -g -DNDEBUG -fsanitize=thread CMakeFiles/game_loop_demo.dir/examples/game_loop_demo.cpp.o -o game_loop_demo 
