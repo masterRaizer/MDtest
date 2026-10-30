@@ -1,0 +1,885 @@
+================================================================================
+ GameCommandQueue — очередь команд в главный поток игры (C++17, без мьютексов)
+ Полный исходный код и инструкция в одном файле
+================================================================================
+
+ЧТО ЭТО
+-------
+Header-only библиотека: потоки интерфейса (UI, оверлей, консоль, сеть) отправляют
+команды, а главный поток игры исполняет их раз за кадр. Игровые данные меняются
+только в главном потоке, поэтому гонок нет, а мьютексы не нужны.
+
+КАК ВОССТАНОВИТЬ ПРОЕКТ ИЗ ЭТОГО ФАЙЛА
+--------------------------------------
+1. Создайте папку GameCommandQueue.
+2. Ниже каждый файл начинается строкой
+       ===== FILE: <путь> =====
+   и заканчивается строкой
+       ===== END FILE: <путь> =====
+   Создайте файл по указанному пути (относительно папки GameCommandQueue)
+   и скопируйте в него всё, что между этими строками.
+3. Должна получиться структура:
+
+   GameCommandQueue/
+   ├── CMakeLists.txt
+   ├── README.md
+   ├── .gitignore
+   ├── include/cmdq/command_queue.hpp   <- сама библиотека (единственный нужный файл)
+   ├── examples/game_loop_demo.cpp      <- пример игрового цикла
+   └── tests/command_queue_tests.cpp    <- тесты
+
+   Чтобы подключить очередь к своему проекту, достаточно одного файла
+   include/cmdq/command_queue.hpp — остальное нужно для примера и проверки.
+
+ТРЕБОВАНИЯ
+----------
+- Компилятор с поддержкой C++17: GCC 8+, Clang 7+ или MSVC 2019+.
+- CMake 3.16+ (только для сборки примера и тестов).
+
+СБОРКА И ПРОВЕРКА
+-----------------
+Linux / macOS:
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+    cmake --build build -j
+    ./build/command_queue_tests
+    ./build/game_loop_demo
+
+Windows (Visual Studio):
+    cmake -S . -B build
+    cmake --build build --config Release
+    build\Release\command_queue_tests.exe
+    build\Release\game_loop_demo.exe
+
+Ожидаемый вывод тестов:
+    All command queue tests passed
+
+Проверка на гонки данных (Linux, GCC/Clang):
+    cmake -S . -B build-tsan -DCMDQ_SANITIZE=thread
+    cmake --build build-tsan -j
+    ./build-tsan/command_queue_tests
+
+КАК ИСПОЛЬЗОВАТЬ В ИГРЕ (КРАТКО)
+--------------------------------
+1. Создайте глобальную очередь:
+       #include "cmdq/command_queue.hpp"
+       cmdq::CommandQueue g_commands;
+
+2. Один раз из главного потока игры (например, при первом вызове хука кадра):
+       g_commands.BindToCurrentThread();
+
+3. Каждый кадр в главном потоке (хук Present / Tick / EndScene или главный цикл):
+       g_commands.ExecutePending(std::chrono::microseconds(500)); // бюджет 0.5 мс
+
+4. В потоке интерфейса:
+       g_commands.Post([] { player.hp = 100; });               // просто выполнить
+       int gold = g_commands.Submit([] { return player.gold; }).get(); // получить значение
+
+5. При выгрузке:
+       g_commands.Close();           // новые команды отклоняются
+       // остановить потоки интерфейса
+       g_commands.ExecutePending();  // в главном потоке — исполнить остаток
+
+ВАЖНЫЕ ПРАВИЛА
+--------------
+- Никогда не вызывайте .get() у future из Submit() в главном потоке — это
+  взаимная блокировка (команда исполняется как раз в главном потоке).
+- SetErrorHandler() и SetWakeHandler() вызывайте ДО запуска потоков интерфейса.
+- HasPending() и ExecutePending() вызывайте только из главного потока.
+- Объекты, захваченные командой по ссылке, должны жить до её исполнения.
+- Исключения из команд не выходят в код игры, а передаются в SetErrorHandler().
+
+Подробности (API, вариант с WndProc для Windows) — в README.md ниже.
+
+================================================================================
+ ИСХОДНЫЕ ФАЙЛЫ
+================================================================================
+
+===== FILE: include/cmdq/command_queue.hpp =====
+// cmdq — очередь команд "любой поток -> главный поток игры".
+//
+// Идея:
+//   * Интерфейс (UI-поток, оверлей, сетевой поток и т.п.) НЕ трогает игровые
+//     данные напрямую. Вместо этого он упаковывает действие в команду и кладёт
+//     её в очередь: queue.Post([] { player.hp += 10; });
+//   * Главный поток игры раз за кадр (в своём цикле, в хуке Present/Tick или
+//     в обработчике оконного сообщения) вызывает queue.ExecutePending(),
+//     и все команды исполняются там, где данные меняются — без гонок.
+//
+// Без блокировок:
+//   * Производители кладут команду одной CAS-операцией в lock-free стек
+//     (Treiber stack). Мьютексов нет, главный поток никогда не ждёт UI.
+//   * Главный поток забирает ВСЮ накопленную пачку одной операцией
+//     exchange(nullptr), разворачивает её в FIFO-порядок и исполняет.
+//     Так как потребитель забирает список целиком, а не по одному узлу,
+//     проблемы ABA не возникает.
+//   * Команды, добавленные во время исполнения пачки (в том числе самими
+//     командами), уходят на следующий вызов — кадр не может "зависнуть"
+//     в бесконечном цикле обработки.
+//   * Опциональный бюджет времени: ExecutePending(1ms) исполняет команды,
+//     пока не выйдет бюджет, остаток переносится на следующий кадр
+//     с сохранением порядка.
+//
+// Гарантии порядка: команды одного потока-производителя исполняются в том
+// порядке, в котором были отправлены. Между разными производителями порядок
+// определяется моментом успешной вставки.
+
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <exception>
+#include <functional>
+#include <future>
+#include <thread>
+#include <type_traits>
+#include <utility>
+
+namespace cmdq {
+
+class CommandQueue {
+ public:
+  using Clock = std::chrono::steady_clock;
+  using ErrorHandler = std::function<void(std::exception_ptr)>;
+  using WakeHandler = std::function<void()>;
+
+  CommandQueue() = default;
+  CommandQueue(const CommandQueue&) = delete;
+  CommandQueue& operator=(const CommandQueue&) = delete;
+
+  // Неисполненные команды уничтожаются без вызова. Для команд из Submit()
+  // ожидающая сторона получит std::future_error(broken_promise).
+  // К моменту разрушения производители не должны обращаться к очереди.
+  ~CommandQueue() {
+    DestroyList(head_.exchange(nullptr, std::memory_order_acquire));
+    DestroyList(backlog_head_);
+  }
+
+  // --- Настройка (вызывать до запуска потоков-производителей) ---------------
+
+  // Запоминает текущий поток как главный. Используется Dispatch() и
+  // IsOwnerThread(). Вызовите один раз из главного потока игры.
+  void BindToCurrentThread() noexcept {
+    owner_.store(std::this_thread::get_id(), std::memory_order_release);
+  }
+
+  // Вызывается в главном потоке, если команда бросила исключение.
+  // Исключение никогда не выходит наружу из ExecutePending(): код игры,
+  // в который мы встроены, не должен падать из-за ошибки в команде.
+  void SetErrorHandler(ErrorHandler handler) { on_error_ = std::move(handler); }
+
+  // Вызывается в потоке-производителе, когда очередь переходит из пустого
+  // состояния в непустое (а не на каждую команду). Позволяет разбудить
+  // главный поток, например через PostMessage(hwnd, WM_APP_RUN_COMMANDS).
+  // Обработчик должен быть быстрым и потокобезопасным.
+  void SetWakeHandler(WakeHandler handler) { on_wake_ = std::move(handler); }
+
+  // --- Производители (любой поток) ------------------------------------------
+
+  // Ставит команду в очередь. Не блокирует. Возвращает false, если очередь
+  // закрыта через Close() — команда в этом случае не исполняется.
+  template <class F>
+  bool Post(F&& fn) {
+    if (closed_.load(std::memory_order_acquire)) return false;
+    Push(new CallableNode<std::decay_t<F>>(std::forward<F>(fn)));
+    return true;
+  }
+
+  // Ставит команду в очередь и возвращает future с её результатом. Удобно,
+  // когда интерфейсу нужно прочитать игровое состояние:
+  //   auto hp = queue.Submit([] { return player.hp; });
+  //   ui.Show(hp.get());   // ждёт ТОЛЬКО UI-поток
+  // ВАЖНО: не вызывайте future.get() из главного потока — команда исполнится
+  // именно там, и получится взаимная блокировка.
+  template <class F>
+  auto Submit(F&& fn) -> std::future<std::invoke_result_t<std::decay_t<F>&>> {
+    using R = std::invoke_result_t<std::decay_t<F>&>;
+    std::promise<R> promise;
+    auto future = promise.get_future();
+    // Если очередь закрыта, лямбда (а с ней и promise) просто уничтожится,
+    // и future вернёт broken_promise.
+    Post([promise = std::move(promise), fn = std::forward<F>(fn)]() mutable {
+      try {
+        if constexpr (std::is_void_v<R>) {
+          fn();
+          promise.set_value();
+        } else {
+          promise.set_value(fn());
+        }
+      } catch (...) {
+        promise.set_exception(std::current_exception());
+      }
+    });
+    return future;
+  }
+
+  // Если вызвано из главного потока — исполняет команду сразу, иначе ставит
+  // в очередь. Возвращает false, только если команда была отклонена Close().
+  template <class F>
+  bool Dispatch(F&& fn) {
+    if (IsOwnerThread()) {
+      RunGuarded(fn);
+      return true;
+    }
+    return Post(std::forward<F>(fn));
+  }
+
+  // Запрещает новые команды. Уже поставленные будут исполнены при следующих
+  // ExecutePending() (или уничтожены деструктором).
+  void Close() noexcept { closed_.store(true, std::memory_order_release); }
+  bool IsClosed() const noexcept { return closed_.load(std::memory_order_acquire); }
+
+  bool IsOwnerThread() const noexcept {
+    return owner_.load(std::memory_order_acquire) == std::this_thread::get_id();
+  }
+
+  // --- Главный поток --------------------------------------------------------
+
+  // Исполняет все команды, поставленные до момента вызова.
+  // Возвращает количество исполненных команд.
+  std::size_t ExecutePending() { return Execute(false, Clock::time_point{}); }
+
+  // То же, но не дольше указанного бюджета (минимум одна команда за вызов,
+  // чтобы очередь гарантированно продвигалась). Остаток будет исполнен
+  // при следующем вызове в исходном порядке.
+  template <class Rep, class Period>
+  std::size_t ExecutePending(std::chrono::duration<Rep, Period> budget) {
+    return Execute(true, Clock::now() + std::chrono::duration_cast<Clock::duration>(budget));
+  }
+
+  // Есть ли что исполнять. Вызывать только из главного потока.
+  bool HasPending() const noexcept {
+    return backlog_head_ != nullptr || head_.load(std::memory_order_acquire) != nullptr;
+  }
+
+ private:
+  struct Node {
+    Node* next = nullptr;
+    virtual void Run() = 0;
+    virtual ~Node() = default;
+  };
+
+  // Узел и замыкание лежат в одной аллокации; аллокация происходит
+  // в потоке-производителе, а не в главном потоке.
+  template <class F>
+  struct CallableNode final : Node {
+    template <class U>
+    explicit CallableNode(U&& f) : fn(std::forward<U>(f)) {}
+    void Run() override { fn(); }
+    F fn;
+  };
+
+  void Push(Node* node) noexcept {
+    Node* old_head = head_.load(std::memory_order_relaxed);
+    do {
+      // node ещё не опубликован, поэтому обычная запись безопасна:
+      // release в успешном CAS сделает её видимой потребителю.
+      node->next = old_head;
+    } while (!head_.compare_exchange_weak(old_head, node, std::memory_order_release,
+                                          std::memory_order_relaxed));
+    if (old_head == nullptr && on_wake_) on_wake_();
+  }
+
+  // Забирает всё, что накопили производители, и дописывает в конец backlog
+  // в порядке FIFO. backlog принадлежит только главному потоку.
+  void Drain() noexcept {
+    Node* batch = head_.exchange(nullptr, std::memory_order_acquire);
+    if (batch == nullptr) return;
+
+    Node* new_tail = batch;  // самый свежий узел стека станет последним
+    Node* new_head = nullptr;
+    while (batch != nullptr) {
+      Node* next = batch->next;
+      batch->next = new_head;
+      new_head = batch;
+      batch = next;
+    }
+
+    if (backlog_tail_ != nullptr) {
+      backlog_tail_->next = new_head;
+    } else {
+      backlog_head_ = new_head;
+    }
+    backlog_tail_ = new_tail;
+  }
+
+  std::size_t Execute(bool has_deadline, Clock::time_point deadline) {
+    Drain();
+    std::size_t executed = 0;
+    while (backlog_head_ != nullptr) {
+      // Отцепляем узел до запуска: команда может повторно вызвать
+      // ExecutePending() или Dispatch(), и список должен быть согласован.
+      Node* node = backlog_head_;
+      backlog_head_ = node->next;
+      if (backlog_head_ == nullptr) backlog_tail_ = nullptr;
+
+      RunGuarded(*node);
+      delete node;
+      ++executed;
+
+      if (has_deadline && Clock::now() >= deadline) break;
+    }
+    return executed;
+  }
+
+  template <class F>
+  void RunGuarded(F& fn) {
+    try {
+      if constexpr (std::is_base_of_v<Node, F>) {
+        fn.Run();
+      } else {
+        fn();
+      }
+    } catch (...) {
+      if (on_error_) {
+        try {
+          on_error_(std::current_exception());
+        } catch (...) {
+          // Обработчик ошибок тоже не имеет права уронить игру.
+        }
+      }
+    }
+  }
+
+  static void DestroyList(Node* node) noexcept {
+    while (node != nullptr) {
+      Node* next = node->next;
+      delete node;
+      node = next;
+    }
+  }
+
+  // std::hardware_destructive_interference_size не используем намеренно:
+  // его значение может различаться между единицами трансляции (ABI-предупреждение
+  // GCC), а 64 байта верны для всех актуальных x86/ARM.
+  static constexpr std::size_t kCacheLine = 64;
+
+  // Общая для всех потоков вершина стека — на отдельной кэш-линии, чтобы
+  // запись производителей не инвалидировала данные главного потока.
+  alignas(kCacheLine) std::atomic<Node*> head_{nullptr};
+  std::atomic<bool> closed_{false};
+  std::atomic<std::thread::id> owner_{};
+
+  // Данные только главного потока.
+  alignas(kCacheLine) Node* backlog_head_ = nullptr;
+  Node* backlog_tail_ = nullptr;
+  ErrorHandler on_error_;
+  WakeHandler on_wake_;
+};
+
+}  // namespace cmdq
+===== END FILE: include/cmdq/command_queue.hpp =====
+
+===== FILE: examples/game_loop_demo.cpp =====
+// Демо: "игра" крутит главный цикл ~60 FPS и меняет мир каждый кадр,
+// а отдельный UI-поток (оверлей/меню) управляет миром только через очередь.
+
+#include "cmdq/command_queue.hpp"
+
+#include <atomic>
+#include <cstdio>
+#include <thread>
+
+using namespace std::chrono_literals;
+
+// Данные игры. Принадлежат главному потоку, синхронизации нет совсем.
+struct GameWorld {
+  int frame = 0;
+  int player_hp = 100;
+  int gold = 0;
+  bool god_mode = false;
+};
+
+int main() {
+  GameWorld world;
+  cmdq::CommandQueue commands;
+  commands.BindToCurrentThread();
+  commands.SetErrorHandler([](std::exception_ptr) { std::puts("[game] command failed"); });
+
+  std::atomic<bool> running{true};
+
+  // Поток интерфейса: ничего не знает о синхронизации игры.
+  std::thread ui([&] {
+    commands.Post([&] { world.gold += 250; });
+    commands.Post([&] { world.god_mode = true; });
+
+    std::this_thread::sleep_for(50ms);
+    commands.Post([&] { world.player_hp = 100; });
+
+    // Чтение состояния: ждёт только UI-поток, главный цикл не блокируется.
+    auto snapshot = commands.Submit([&] { return world; }).get();
+    std::printf("[ui]   frame=%d hp=%d gold=%d god=%d\n", snapshot.frame, snapshot.player_hp,
+                snapshot.gold, snapshot.god_mode);
+
+    commands.Post([] { throw std::runtime_error("bad command"); });
+    commands.Post([&] { running = false; });
+  });
+
+  // Главный цикл игры (в реальном моде это хук Present/Tick игры).
+  while (running) {
+    const auto frame_start = std::chrono::steady_clock::now();
+
+    // 1) Команды из интерфейса — не больше 1 мс на кадр.
+    commands.ExecutePending(1ms);
+
+    // 2) Обычная логика кадра, свободно меняющая те же данные.
+    ++world.frame;
+    if (!world.god_mode && world.player_hp > 0) --world.player_hp;
+
+    std::this_thread::sleep_until(frame_start + 16ms);
+  }
+  commands.Close();
+  ui.join();
+  commands.ExecutePending();
+
+  std::printf("[game] finished at frame=%d hp=%d gold=%d\n", world.frame, world.player_hp,
+              world.gold);
+  return 0;
+}
+===== END FILE: examples/game_loop_demo.cpp =====
+
+===== FILE: tests/command_queue_tests.cpp =====
+// Тесты без внешних зависимостей. Запускайте также под -DCMDQ_SANITIZE=thread:
+// игровые данные в тестах намеренно НЕ атомарные, поэтому любая гонка
+// будет найдена ThreadSanitizer'ом.
+
+#include "cmdq/command_queue.hpp"
+
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+#define CHECK(cond)                                                          \
+  do {                                                                       \
+    if (!(cond)) {                                                           \
+      std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, \
+                   #cond);                                                   \
+      std::exit(1);                                                          \
+    }                                                                        \
+  } while (0)
+
+using namespace std::chrono_literals;
+
+static void TestFifoSingleProducer() {
+  cmdq::CommandQueue q;
+  std::vector<int> order;
+  for (int i = 0; i < 100; ++i) q.Post([&order, i] { order.push_back(i); });
+  CHECK(q.ExecutePending() == 100);
+  CHECK(order.size() == 100);
+  for (int i = 0; i < 100; ++i) CHECK(order[i] == i);
+  CHECK(!q.HasPending());
+  CHECK(q.ExecutePending() == 0);
+}
+
+static void TestMultiProducerOrderAndCount() {
+  constexpr int kProducers = 4;
+  constexpr int kPerProducer = 50000;
+
+  cmdq::CommandQueue q;
+  q.BindToCurrentThread();
+
+  // "Игровое состояние": меняется только в главном потоке, без атомиков.
+  int last_seen[kProducers];
+  for (int& v : last_seen) v = -1;
+  long long total = 0;
+  bool order_ok = true;
+
+  std::vector<std::thread> producers;
+  for (int p = 0; p < kProducers; ++p) {
+    producers.emplace_back([&, p] {
+      for (int i = 0; i < kPerProducer; ++i) {
+        q.Post([&, p, i] {
+          if (last_seen[p] + 1 != i) order_ok = false;
+          last_seen[p] = i;
+          ++total;
+        });
+      }
+    });
+  }
+
+  // Главный цикл: крутим кадры, пока всё не исполнится.
+  const long long expected = static_cast<long long>(kProducers) * kPerProducer;
+  while (total < expected) {
+    q.ExecutePending();
+    std::this_thread::yield();
+  }
+  for (auto& t : producers) t.join();
+  q.ExecutePending();
+
+  CHECK(order_ok);
+  CHECK(total == expected);
+  for (int v : last_seen) CHECK(v == kPerProducer - 1);
+}
+
+static void TestCommandsPostedDuringExecutionRunNextFrame() {
+  cmdq::CommandQueue q;
+  int runs = 0;
+  // Команда, которая перевыставляет сама себя: без защиты кадр бы завис.
+  std::function<void()> self;
+  self = [&] {
+    ++runs;
+    q.Post(self);
+  };
+  q.Post(self);
+  CHECK(q.ExecutePending() == 1);
+  CHECK(runs == 1);
+  CHECK(q.ExecutePending() == 1);
+  CHECK(runs == 2);
+}
+
+static void TestBudgetCarriesOverInOrder() {
+  cmdq::CommandQueue q;
+  std::vector<int> order;
+  for (int i = 0; i < 10; ++i) {
+    q.Post([&order, i] {
+      order.push_back(i);
+      std::this_thread::sleep_for(2ms);
+    });
+  }
+  std::size_t first = q.ExecutePending(3ms);
+  CHECK(first >= 1);
+  CHECK(first < 10);
+
+  // Новая команда должна встать ПОСЛЕ перенесённого остатка.
+  q.Post([&order] { order.push_back(100); });
+
+  // Нулевой бюджет — всё равно ровно одна команда за вызов (прогресс).
+  CHECK(q.ExecutePending(0ms) == 1);
+
+  while (q.HasPending()) q.ExecutePending();
+  CHECK(order.size() == 11);
+  for (int i = 0; i < 10; ++i) CHECK(order[i] == i);
+  CHECK(order[10] == 100);
+}
+
+static void TestExceptionsAreContained() {
+  cmdq::CommandQueue q;
+  std::string error;
+  q.SetErrorHandler([&](std::exception_ptr e) {
+    try {
+      std::rethrow_exception(e);
+    } catch (const std::exception& ex) {
+      error = ex.what();
+    }
+  });
+  bool after = false;
+  q.Post([] { throw std::runtime_error("boom"); });
+  q.Post([&] { after = true; });
+  CHECK(q.ExecutePending() == 2);
+  CHECK(error == "boom");
+  CHECK(after);
+
+  // Без обработчика исключение тоже не выходит наружу.
+  cmdq::CommandQueue silent;
+  silent.Post([] { throw 42; });
+  CHECK(silent.ExecutePending() == 1);
+}
+
+static void TestSubmitReturnsValueFromMainThread() {
+  cmdq::CommandQueue q;
+  q.BindToCurrentThread();
+  const auto main_id = std::this_thread::get_id();
+  int gold = 500;  // данные главного потока
+
+  std::atomic<bool> done{false};
+  int result = 0;
+  bool ran_on_main = false;
+  bool got_exception = false;
+
+  std::thread ui([&] {
+    auto fut = q.Submit([&] {
+      ran_on_main = std::this_thread::get_id() == main_id;
+      return gold;
+    });
+    result = fut.get();
+
+    auto bad = q.Submit([]() -> int { throw std::logic_error("no"); });
+    try {
+      bad.get();
+    } catch (const std::logic_error&) {
+      got_exception = true;
+    }
+
+    auto void_fut = q.Submit([&] { gold += 1; });
+    void_fut.get();
+    done = true;
+  });
+
+  while (!done) {
+    q.ExecutePending();
+    std::this_thread::yield();
+  }
+  ui.join();
+  CHECK(result == 500);
+  CHECK(ran_on_main);
+  CHECK(got_exception);
+  CHECK(gold == 501);
+}
+
+static void TestCloseRejectsAndBreaksPromise() {
+  cmdq::CommandQueue q;
+  q.Close();
+  CHECK(q.IsClosed());
+  bool ran = false;
+  CHECK(!q.Post([&] { ran = true; }));
+  auto fut = q.Submit([] { return 1; });
+  bool broken = false;
+  try {
+    fut.get();
+  } catch (const std::future_error& e) {
+    broken = e.code() == std::future_errc::broken_promise;
+  }
+  CHECK(broken);
+  CHECK(q.ExecutePending() == 0);
+  CHECK(!ran);
+}
+
+static void TestDestructorFreesPendingCommands() {
+  static int alive = 0;
+  struct Tracker {
+    Tracker() { ++alive; }
+    Tracker(const Tracker&) { ++alive; }
+    Tracker(Tracker&&) noexcept { ++alive; }
+    ~Tracker() { --alive; }
+  };
+  std::future<int> fut;
+  {
+    cmdq::CommandQueue q;
+    // Нулевой бюджет исполнит только первую команду, остальные пять
+    // останутся в backlog; ещё две команды останутся в lock-free стеке.
+    q.Post([] {});
+    for (int i = 0; i < 5; ++i) q.Post([t = Tracker{}] {});
+    CHECK(q.ExecutePending(0ms) == 1);
+    q.Post([t = Tracker{}] {});
+    fut = q.Submit([] { return 7; });
+    CHECK(alive == 6);
+  }
+  CHECK(alive == 0);
+  bool broken = false;
+  try {
+    fut.get();
+  } catch (const std::future_error&) {
+    broken = true;
+  }
+  CHECK(broken);
+}
+
+static void TestDispatchRunsInlineOnOwner() {
+  cmdq::CommandQueue q;
+  q.BindToCurrentThread();
+  int value = 0;
+  CHECK(q.Dispatch([&] { value = 1; }));
+  CHECK(value == 1);  // исполнено сразу, без очереди
+  CHECK(!q.HasPending());
+
+  std::thread other([&] { q.Dispatch([&] { value = 2; }); });
+  other.join();
+  CHECK(value == 1);
+  CHECK(q.ExecutePending() == 1);
+  CHECK(value == 2);
+}
+
+static void TestWakeOnlyOnEmptyToNonEmpty() {
+  cmdq::CommandQueue q;
+  std::atomic<int> wakes{0};
+  q.SetWakeHandler([&] { ++wakes; });
+  q.Post([] {});
+  q.Post([] {});
+  q.Post([] {});
+  CHECK(wakes == 1);
+  q.ExecutePending();
+  q.Post([] {});
+  CHECK(wakes == 2);
+  q.ExecutePending();
+}
+
+int main() {
+  TestFifoSingleProducer();
+  TestMultiProducerOrderAndCount();
+  TestCommandsPostedDuringExecutionRunNextFrame();
+  TestBudgetCarriesOverInOrder();
+  TestExceptionsAreContained();
+  TestSubmitReturnsValueFromMainThread();
+  TestCloseRejectsAndBreaksPromise();
+  TestDestructorFreesPendingCommands();
+  TestDispatchRunsInlineOnOwner();
+  TestWakeOnlyOnEmptyToNonEmpty();
+  std::puts("All command queue tests passed");
+  return 0;
+}
+===== END FILE: tests/command_queue_tests.cpp =====
+
+===== FILE: CMakeLists.txt =====
+cmake_minimum_required(VERSION 3.16)
+project(cmdq LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(CMDQ_SANITIZE "" CACHE STRING "Sanitizer for tests/examples: thread, address or empty")
+
+find_package(Threads REQUIRED)
+
+add_library(cmdq INTERFACE)
+target_include_directories(cmdq INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(cmdq INTERFACE Threads::Threads)
+
+function(cmdq_target name source)
+  add_executable(${name} ${source})
+  target_link_libraries(${name} PRIVATE cmdq)
+  if(MSVC)
+    target_compile_options(${name} PRIVATE /W4 /utf-8)
+  else()
+    target_compile_options(${name} PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  if(CMDQ_SANITIZE)
+    target_compile_options(${name} PRIVATE -fsanitize=${CMDQ_SANITIZE} -g -fno-omit-frame-pointer)
+    target_link_options(${name} PRIVATE -fsanitize=${CMDQ_SANITIZE})
+  endif()
+endfunction()
+
+cmdq_target(game_loop_demo examples/game_loop_demo.cpp)
+
+enable_testing()
+cmdq_target(command_queue_tests tests/command_queue_tests.cpp)
+add_test(NAME command_queue_tests COMMAND command_queue_tests)
+===== END FILE: CMakeLists.txt =====
+
+===== FILE: .gitignore =====
+build*/
+===== END FILE: .gitignore =====
+
+===== FILE: README.md =====
+# cmdq — очередь команд в главный поток игры
+
+Header-only библиотека на C++17 (`include/cmdq/command_queue.hpp`) для приложений,
+работающих внутри игры (оверлей, меню, мод, отладочная консоль). Интерфейс живёт в своём
+потоке, а игровые данные меняются в главном потоке, поэтому UI не трогает их напрямую:
+он отправляет **команды**, а главный поток исполняет их в безопасный момент кадра.
+
+## Как это устроено
+
+```
+ UI-поток ─┐  Post(cmd)   ┌──────────────────────┐ exchange(nullptr) ┌──────────────┐
+ Сеть   ───┼────CAS──────▶│  lock-free стек      │──────────────────▶│ backlog FIFO │──▶ исполнение
+ Консоль ──┘              │  (общий, atomic head)│   раз за кадр     │(только main) │   в главном потоке
+                          └──────────────────────┘                   └──────────────┘
+```
+
+* **Без мьютексов.** Производитель добавляет команду одной CAS-операцией. Главный поток
+  забирает всю накопленную пачку одной `exchange(nullptr)` и разворачивает её в FIFO.
+  Потребитель берёт список целиком, поэтому проблемы ABA нет, и главный поток **никогда
+  не ждёт** другие потоки.
+* **Порядок.** Команды одного потока исполняются в порядке отправки.
+* **Кадр не зависает.** Команды, поставленные во время исполнения пачки (в том числе
+  самими командами), уходят на следующий кадр.
+* **Бюджет времени.** `ExecutePending(1ms)` прекращает работу по истечении бюджета, остаток
+  переносится на следующий кадр без потери порядка (минимум одна команда за вызов).
+* **Изоляция ошибок.** Исключение из команды не выходит в код игры — оно передаётся в
+  `SetErrorHandler`, а остальные команды продолжают исполняться.
+* **Без лишней работы в главном потоке.** Аллокация команды (замыкание + узел очереди —
+  одна аллокация) происходит в потоке-производителе.
+
+## API
+
+| Метод | Поток | Назначение |
+|---|---|---|
+| `Post(fn)` | любой | Поставить команду, не блокирует. `false`, если очередь закрыта. |
+| `Submit(fn) -> std::future<R>` | любой (кроме главного для `get()`) | Команда с результатом / исключением, например чтение состояния. |
+| `Dispatch(fn)` | любой | В главном потоке — выполнить сразу, иначе `Post`. |
+| `ExecutePending()` / `ExecutePending(budget)` | главный | Исполнить накопленные команды. |
+| `BindToCurrentThread()` | главный | Отметить главный поток (для `Dispatch`). |
+| `SetErrorHandler(h)` / `SetWakeHandler(h)` | до старта потоков | Обработка ошибок / пробуждение главного потока. |
+| `Close()` | любой | Перестать принимать команды (при выгрузке). |
+
+> `future.get()` из `Submit` нельзя вызывать в главном потоке: команда исполняется именно
+> там, получится взаимная блокировка.
+
+## Встраивание
+
+### Вариант 1: вызов в главном цикле / хуке кадра
+
+```cpp
+cmdq::CommandQueue g_commands;
+
+// Один раз, из главного потока игры (например, в первом вызове хука).
+g_commands.BindToCurrentThread();
+
+// Хук Present / Tick / EndScene — выполняется в главном потоке каждый кадр.
+void OnGameFrame() {
+    g_commands.ExecutePending(std::chrono::microseconds(500));
+    // ... рендер оверлея и т.п.
+}
+
+// Поток интерфейса:
+void OnHealButton() {
+    g_commands.Post([] { Game::LocalPlayer()->SetHealth(100); });
+}
+
+void RefreshStats() {
+    int gold = g_commands.Submit([] { return Game::LocalPlayer()->Gold(); }).get();
+    ui.SetGold(gold);
+}
+```
+
+### Вариант 2: через обработчик оконных сообщений (Windows)
+
+Если у игры нет удобного хука кадра, можно будить главный поток сообщением.
+`SetWakeHandler` вызывается только при переходе очереди из пустой в непустую, поэтому
+сообщения не спамятся.
+
+```cpp
+constexpr UINT WM_APP_RUN_COMMANDS = WM_APP + 0x42;
+
+g_commands.SetWakeHandler([] { PostMessage(g_gameHwnd, WM_APP_RUN_COMMANDS, 0, 0); });
+
+LRESULT CALLBACK HookedWndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
+    if (msg == WM_APP_RUN_COMMANDS) {
+        g_commands.ExecutePending(std::chrono::milliseconds(1));
+        if (g_commands.HasPending())  // бюджет кончился — дочистим позже
+            PostMessage(h, WM_APP_RUN_COMMANDS, 0, 0);
+        return 0;
+    }
+    return CallWindowProc(g_originalWndProc, h, msg, w, l);
+}
+```
+
+### Выгрузка
+
+```cpp
+g_commands.Close();            // новые команды отклоняются
+// ... остановить UI-потоки ...
+g_commands.ExecutePending();   // в главном потоке: исполнить оставшееся
+```
+
+Неисполненные при разрушении команды освобождаются без вызова; ожидающие `Submit`
+получают `std::future_error(broken_promise)` вместо вечного ожидания.
+
+## Сборка и тесты
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
+
+```bash
+cmake --build build -j && ./build/command_queue_tests && ./build/game_loop_demo
+```
+
+Проверка гонок (игровые данные в тестах намеренно не атомарные):
+
+```bash
+cmake -S . -B build-tsan -DCMDQ_SANITIZE=thread && cmake --build build-tsan -j && ./build-tsan/command_queue_tests
+```
+
+## Ограничения
+
+* `Post` использует `new`; системный аллокатор может кратко брать внутренние блокировки,
+  но это происходит в потоке-производителе. Освобождение узла выполняется в главном потоке.
+* `SetErrorHandler` и `SetWakeHandler` нужно вызывать до запуска производителей.
+* Объекты, захваченные командой по ссылке, должны жить до её исполнения.
+===== END FILE: README.md =====
