@@ -1,0 +1,37 @@
+cmake_minimum_required(VERSION 3.16)
+project(memrefl LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(MEMREFL_SANITIZE "" CACHE STRING "Sanitizer for tests/examples: address, undefined or empty")
+
+add_library(memrefl INTERFACE)
+target_include_directories(memrefl INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+function(memrefl_target name source)
+  add_executable(${name} ${source})
+  target_link_libraries(${name} PRIVATE memrefl)
+  if(MSVC)
+    target_compile_options(${name} PRIVATE /W4 /utf-8)
+  else()
+    target_compile_options(${name} PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  if(MEMREFL_SANITIZE)
+    target_compile_options(${name} PRIVATE -fsanitize=${MEMREFL_SANITIZE} -g -fno-omit-frame-pointer)
+    target_link_options(${name} PRIVATE -fsanitize=${MEMREFL_SANITIZE})
+  endif()
+endfunction()
+
+memrefl_target(scan_demo examples/scan_demo.cpp)
+memrefl_target(scan_benchmark examples/scan_benchmark.cpp)
+
+enable_testing()
+memrefl_target(signature_scanner_tests tests/signature_scanner_tests.cpp)
+add_test(NAME signature_scanner_tests COMMAND signature_scanner_tests)
+
+# Те же тесты без SSE2: проверяет запасной путь (memchr) на любой платформе.
+memrefl_target(signature_scanner_tests_scalar tests/signature_scanner_tests.cpp)
+target_compile_definitions(signature_scanner_tests_scalar PRIVATE MEMREFL_NO_SIMD)
+add_test(NAME signature_scanner_tests_scalar COMMAND signature_scanner_tests_scalar)
