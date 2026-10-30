@@ -1,5 +1,0 @@
-/home/user/MDtest/build-asan/CMakeFiles/game_loop_demo.dir
-/home/user/MDtest/build-asan/CMakeFiles/command_queue_tests.dir
-/home/user/MDtest/build-asan/CMakeFiles/test.dir
-/home/user/MDtest/build-asan/CMakeFiles/edit_cache.dir
-/home/user/MDtest/build-asan/CMakeFiles/rebuild_cache.dir

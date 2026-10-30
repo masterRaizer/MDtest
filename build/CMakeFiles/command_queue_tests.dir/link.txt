@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/command_queue_tests.dir/tests/command_queue_tests.cpp.o -o command_queue_tests 

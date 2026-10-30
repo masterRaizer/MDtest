@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/game_loop_demo.dir/examples/game_loop_demo.cpp.o -o game_loop_demo 
