@@ -281,6 +281,15 @@ class SignatureScanner {
     return matches.front();
   }
 
+  // Цель относительной инструкции в единственном совпадении сигнатуры —
+  // обычный способ найти глобальную переменную или функцию:
+  //   FindRelativeTarget(Pattern("48 8B 05 ?? ?? ?? ?? 48 85 C0"), 3, 7)  // &g_Global
+  std::optional<std::uintptr_t> FindRelativeTarget(const Pattern& pattern, std::size_t disp_offset,
+                                                   std::size_t instruction_size) const {
+    const std::optional<std::uintptr_t> hit = FindUnique(pattern);
+    return hit ? ResolveRelative(*hit, disp_offset, instruction_size) : std::nullopt;
+  }
+
   // Перегрузки для строк разбирают сигнатуру при каждом вызове и бросают
   // std::invalid_argument при ошибке формата. Для повторного поиска храните Pattern.
   std::optional<std::uintptr_t> FindFirst(std::string_view signature) const {

@@ -30,6 +30,7 @@ endfunction()
 memrefl_target(scan_demo examples/scan_demo.cpp)
 memrefl_target(scan_benchmark examples/scan_benchmark.cpp)
 memrefl_target(resolver_demo examples/resolver_demo.cpp)
+memrefl_target(property_demo examples/property_demo.cpp)
 
 enable_testing()
 memrefl_target(signature_scanner_tests tests/signature_scanner_tests.cpp)
@@ -42,3 +43,6 @@ add_test(NAME signature_scanner_tests_scalar COMMAND signature_scanner_tests_sca
 
 memrefl_target(data_resolver_tests tests/data_resolver_tests.cpp)
 add_test(NAME data_resolver_tests COMMAND data_resolver_tests)
+
+memrefl_target(property_fetcher_tests tests/property_fetcher_tests.cpp)
+add_test(NAME property_fetcher_tests COMMAND property_fetcher_tests)

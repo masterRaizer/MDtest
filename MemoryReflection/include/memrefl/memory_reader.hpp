@@ -22,10 +22,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -143,18 +145,66 @@ class ProcessMemoryReader final : public MemoryReader {
 // Нулевой указатель на любом шаге — nullopt.
 class PointerPath {
  public:
+  // Результат с причиной неудачи: на каком шаге и почему оборвалась цепочка.
+  struct Trace {
+    std::optional<std::uintptr_t> address;
+    std::size_t failed_step = 0;  // индекс смещения, перед которым не удалось прочитать указатель
+    bool null_pointer = false;    // указатель прочитан, но равен нулю (иначе — память недоступна)
+  };
+
   PointerPath() = default;
   PointerPath(std::uintptr_t base) : base_(base) {}  // NOLINT: неявное — удобно в конфигурациях
   PointerPath(std::uintptr_t base, std::initializer_list<std::ptrdiff_t> offsets) : base_(base), offsets_(offsets) {}
 
   std::optional<std::uintptr_t> Resolve(const MemoryReader& reader, std::size_t pointer_size = sizeof(void*)) const {
+    return ResolveTraced(reader, pointer_size).address;
+  }
+
+  Trace ResolveTraced(const MemoryReader& reader, std::size_t pointer_size = sizeof(void*)) const {
+    Trace trace;
     std::uintptr_t address = base_;
-    for (const std::ptrdiff_t offset : offsets_) {
+    for (std::size_t step = 0; step < offsets_.size(); ++step) {
       const std::optional<std::uintptr_t> next = reader.ReadPointer(address, pointer_size);
-      if (!next || *next == 0) return std::nullopt;
-      address = *next + static_cast<std::uintptr_t>(offset);
+      if (!next || *next == 0) {
+        trace.failed_step = step;
+        trace.null_pointer = next.has_value();
+        return trace;
+      }
+      address = *next + static_cast<std::uintptr_t>(offsets_[step]);
     }
-    return address;
+    trace.address = address;
+    return trace;
+  }
+
+  // Построение пути по шагам: сдвиг текущего адреса и переход по указателю.
+  PointerPath& Offset(std::ptrdiff_t delta) {
+    if (offsets_.empty()) {
+      base_ += static_cast<std::uintptr_t>(delta);
+    } else {
+      offsets_.back() += delta;
+    }
+    return *this;
+  }
+  PointerPath& Dereference() {
+    offsets_.push_back(0);
+    return *this;
+  }
+
+  // "[[0x10002000]+0x30]+0x8" — для логов и отчётов.
+  std::string ToString() const {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "0x%llX", static_cast<unsigned long long>(base_));
+    std::string out = buffer;
+    for (const std::ptrdiff_t offset : offsets_) {
+      out = "[" + out + "]";
+      if (offset != 0) {
+        const unsigned long long magnitude =
+            offset < 0 ? 0ull - static_cast<unsigned long long>(offset) : static_cast<unsigned long long>(offset);
+        std::snprintf(buffer, sizeof(buffer), "%c0x%llX", offset < 0 ? '-' : '+', magnitude);
+        out += buffer;
+      }
+    }
+    return out;
   }
 
   std::uintptr_t base() const noexcept { return base_; }

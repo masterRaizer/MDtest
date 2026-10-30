@@ -7,7 +7,7 @@ Header-only библиотека на C++17 для анализа структу
 |---|---|---|
 | 1 | **Поиск сигнатур**: адреса функций и глобальных переменных, которые не нужно обновлять вручную после каждого обновления бинарника | готов |
 | 2 | **Generic Data Resolver**: числовые ID объектов из памяти → читаемые имена (массивы, хеш-таблицы, словари; UTF-8/UTF-16) | готов |
-| 3 | **Доступ к свойствам по строковым ключам**: смещения полей вычисляются по описаниям структур | следующий |
+| 3 | **PropertyFetcher**: значения свойств по строковому пути (`"Hero.Bag.Items[1].Quantity"`) — по описаниям структур или по метаданным рефлексии самой программы | готов |
 
 ---
 
@@ -93,6 +93,7 @@ PE-заголовков, а затем каждая проверяется че�
 | `FindUnique(p)` | Адрес, **только если совпадение одно**. Основной метод: «нашлось два» означает, что сигнатура устарела |
 | `FindFirst(p)` / `FindAll(p, max)` / `ForEachMatch(p, cb)` | Первое / все / потоковый перебор совпадений по возрастанию адреса |
 | `ResolveRelative(addr, disp_offset, insn_size)` | Цель `call/jmp rel32`, `mov/lea [rip+disp32]` |
+| `FindRelativeTarget(p, disp_offset, insn_size)` | `FindUnique` + `ResolveRelative`: адрес глобальной переменной или функции по инструкции, которая к ней обращается |
 | `Read<T>(addr)` / `Contains(addr, size)` | Чтение по адресу цели с проверкой границ |
 | `ScannerForModule(name, filter)` / `LoadedModuleRegions(...)` | Модуль текущего процесса (`""` — главный exe). `SectionFilter::Code` — код, `All` — код и данные |
 | `PeImageRegions(buf, size, PeLayout::File/Mapped, filter, base)` / `ParsePeHeaders` | PE из буфера: файл или дамп |
@@ -281,7 +282,11 @@ memrefl::SignatureScanner scanner(memrefl::MemoryRegion::Snapshot(copy.data(), c
 Найденные имена кешируются. Промахи по умолчанию не кешируются, потому что в
 живом процессе имя может появиться позже; это включается через
 `ResolverOptions::cache_misses`. `Resolve` можно вызывать из нескольких
-потоков: память читается без блокировки, а кеш защищён `shared_mutex`.
+потоков: память читается без блокировки, а кеш защищён `std::mutex`. Под ним
+выполняются только поиск в хеш-таблице и копирование строки. `std::shared_mutex`
+здесь не используется: в сборке MinGW под Wine 4-поточный тест с ним изредка
+получал «не найдено» для известных ID, а тот же шаблон доступа без memrefl
+зависал. С `std::mutex` тест прошёл 15 запусков подряд.
 
 ### Пример
 
@@ -327,6 +332,176 @@ UTF-16 имён с цепочками. Для отсутствующих сво�
 
 ---
 
+## Модуль 3: PropertyFetcher — свойства по строковому пути
+
+```cpp
+fetcher.Get<int>(hero, "Health");                               // Result<int>
+fetcher.Get<std::string>(world, "Hero.Bag.Items[1].DisplayName");
+```
+
+PropertyFetcher соединяет модули:
+
+```
+ ObjectRef{root, type}       путь "Hero.Bag.Items[1].Quantity"
+      │                                 │
+      ▼                                 ▼
+ тип объекта ──────▶ схема ──▶ сегмент за сегментом: смещение, переход по указателю,
+ (имя схемы или       │          проверка индекса массива
+  TypeInfo в памяти)  │                 │
+      ▲               │                 ▼
+ модуль 2: ID имён ───┘           PointerPath ──▶ адрес ──▶ значение с проверкой типа
+ типов и свойств                  (модуль 2)               (Result<T>)
+      ▲
+ модуль 1: адрес глобальной переменной (корень) по сигнатуре
+```
+
+1. **Тип объекта** задаётся именем статической схемы. Если имя не задано, тип
+   читается из памяти через `ReflectionLoader`: объект → указатель на
+   описание типа → ID имени → `GenericDataResolver`.
+2. **Сегменты пути** ищутся в схеме с учётом родителей и превращаются в шаги
+   `PointerPath`: смещение поля, переход по указателю (`StructPointer`, данные
+   динамического массива). Индекс сверяется с длиной массива в памяти.
+3. **Значение** читается с проверкой границ памяти. Целые расширяются со знаком,
+   ID имён разрешаются в строки, строки приводятся к UTF-8. `Get<T>`
+   проверяет, что значение помещается в `T`.
+
+Корень объекта задаётся через `PointerPath`. Это может быть адрес или цепочка
+от глобальной переменной, найденной сигнатурой: `ObjectRef{PointerPath(&g_World, {0})}`.
+Если программа пересоздаст объект, путь останется верным.
+
+### Откуда берутся схемы
+
+**Статически** — по результатам исследования или из конфига:
+
+```cpp
+auto schemas = std::make_shared<memrefl::SchemaRegistry>();
+schemas->Add(memrefl::TypeSchema("Actor")
+                 .Add("Id", memrefl::PropertyType::UInt32, 0x00)
+                 .Add(memrefl::BoolProperty("IsActive", 0x04, /*mask=*/0x01)));
+schemas->Add(memrefl::TypeSchema("Character", /*parent=*/"Actor")
+                 .Add("Health", memrefl::PropertyType::Int32, 0x10)
+                 .Add("Defense", memrefl::PropertyType::Float, 0x14)
+                 .Add(memrefl::NameProperty("Class", 0x1C))                       // ID -> строка
+                 .Add(memrefl::StructProperty("Stats", 0x50, "Stats"))            // структура по значению
+                 .Add(memrefl::ObjectProperty("Inventory", 0x68, "Inventory")));  // указатель
+// Динамический массив {Item** data; int32 count}: count через 8 байт после data.
+memrefl::PropertyDesc items = memrefl::DynamicArrayProperty("Items", 0, memrefl::PropertyType::StructPointer, 8);
+items.struct_type = "Item";
+```
+
+**Из метаданных рефлексии программы.** Многие программы (движки, фреймворки
+с метаобъектами, кодогенерация для сериализации) хранят описания своих типов
+в памяти. `ReflectionLayout` описывает, как они устроены:
+
+| Где | Поле `ReflectionLayout` |
+|---|---|
+| объект → его тип | `object_type_offset` |
+| тип: ID имени, родитель, список свойств | `type_name_offset/size`, `super_offset`, `list_kind` (связный список или массив указателей), `list_offset`, `list_count_offset` |
+| дескриптор свойства: ID имени, смещение, тег, вложенный тип | `property_name_offset`, `property_offset_offset`, `property_tag_offset`, `property_inner_type_offset`, `next_offset` |
+| тег → тип значения | `tags[tag] = PropertyDesc-прототип` или свой `classify(reader, descriptor)` |
+
+Работа загрузчика:
+
+* имена типов и свойств разрешаются через `GenericDataResolver`;
+* свойства родителей входят в схему первыми; свойство потомка с тем же именем
+  заменяет родительское;
+* неизвестный тег даёт свойство типа `Unknown`: оно видно в `Dump()`, но не читается;
+* для указателя без статического типа берётся **фактический** тип объекта,
+  поэтому доступны свойства наследника.
+
+Схемы кешируются по адресу типа. Циклы в цепочке родителей и в списке свойств
+обрываются, а число свойств ограничено `max_properties`.
+
+Оба способа совмещаются. Статическая схема может содержать
+`ObjectProperty("Hero", 0)` без типа, и дальше путь пойдёт по метаданным.
+
+### Синтаксис пути и типы
+
+Путь — это имена через точку, у массивов индекс в скобках: `Stats.Resist[2]`,
+`Inventory.Items[1].Name`. Имя может содержать любые символы, кроме `.`, `[` и
+`]`. Массивы массивов не поддерживаются.
+
+| `PropertyType` | Значение (`PropertyValue`) |
+|---|---|
+| `Bool` (с `bool_mask` для битовых полей) | `bool` |
+| `Int8..Int64` | `int64_t`, со знаковым расширением |
+| `UInt8..UInt64` | `uint64_t` |
+| `Float`, `Double` | `double` |
+| `String` (любой `StringFormat` из модуля 2) | `std::string` (UTF-8) |
+| `Name` (ID, `name_id_size`) | `std::string` через resolver (`SetNameResolver`) |
+| `Pointer`, `StructPointer` | `Address` |
+| `Struct` | `Address` начала структуры |
+| `Array` | `Address` элементов: inline (`inline_count`) или `{T* data; ...; count}` (`count_offset`) |
+
+### API
+
+| Метод | Назначение |
+|---|---|
+| `Get<T>(obj, path)` | `Result<T>`. Для `T` целого типа значение должно помещаться в `T`, иначе ошибка `ValueOutOfRange`. Вещественный `T` принимает и целые. `std::string` и `Address` — только при точном совпадении вида значения |
+| `Fetch(obj, path)` | `Result<PropertyValue>`; `FormatValue()` превращает значение в текст для отчёта |
+| `Locate(obj, path)` → `Read(location)` | Путь разбирается один раз, затем значение перечитывается по готовому `PointerPath`. Подходит для частого опроса |
+| `Count(obj, array_path)` | Длина массива |
+| `TypeName(obj)` | Имя типа: из `ObjectRef` или из метаданных |
+| `Dump(obj)` | Все свойства со значениями, родительские первыми. Ошибка одного свойства не прерывает выгрузку |
+
+Ошибки не бросаются, а возвращаются в `Result<T>`: `ok()`, `value_or()`,
+`error().code` и `error().message`. Сообщение содержит путь, например
+`'Hero.Bag.Items[2]': index out of range, count is 2` или
+`type 'Character' has no property 'Helth'; did you mean 'Health'?`.
+`value()` на ошибке бросает `BadResultAccess`.
+
+| Код | Когда |
+|---|---|
+| `InvalidPath` | синтаксис пути; поле у скаляра; индекс у не-массива |
+| `UnknownType` / `UnknownProperty` | нет схемы / нет свойства (с подсказкой) |
+| `NullPointer` / `UnreadableMemory` | нулевой указатель на пути / память недоступна |
+| `IndexOutOfRange` / `ValueOutOfRange` | индекс за длиной / значение не помещается в `T` или мусорная длина |
+| `TypeMismatch` / `UnsupportedType` | `Get<T>` с несовместимым `T` / тип `Unknown`, нет resolver'а |
+| `NameUnresolved` | ID имени нет в таблице |
+
+### Пример: все три модуля вместе
+
+```cpp
+auto reader = std::make_shared<memrefl::ProcessMemoryReader>(memrefl::ProcessMemoryReader::Self());
+
+// Модуль 1: &g_World по инструкции "mov rax, [rip + g_World]; test rax, rax; jz ...".
+auto code = memrefl::ScannerForModule("app.exe");
+auto world_global = code.FindRelativeTarget(memrefl::Pattern("48 8B 05 ?? ?? ?? ?? 48 85 C0 74 ??"), 3, 7);
+
+// Модуль 2: таблица имён программы.
+auto names = std::make_shared<memrefl::GenericDataResolver>(reader, names_table_spec);
+
+// Модуль 3: схемы из метаданных программы.
+memrefl::PropertyFetcher fetcher(reader);
+fetcher.SetReflection(std::make_shared<memrefl::ReflectionLoader>(reader, names, layout))
+       .SetNameResolver(names);
+
+const memrefl::ObjectRef world{memrefl::PointerPath(*world_global, {0})};  // *g_World, тип из памяти
+int health   = fetcher.Get<int>(world, "Hero.Health").value_or(0);
+auto potions = fetcher.Get<int>(world, "Hero.Bag.Items[1].Quantity");
+if (!potions) log(potions.error().message);
+```
+
+Полный рабочий пример — `examples/property_demo.cpp`. В нём «приложение» со
+своей таблицей имён, описаниями типов (`TypeInfo`/`PropInfo`) и кодом,
+обращающимся к `g_World`. Инструмент находит `g_World` сигнатурой, разрешает
+имена и читает свойства по путям. Затем приложение меняет свои данные, и
+значение перечитывается по сохранённому `Locate()`.
+
+### Ограничения
+
+* Только чтение: PropertyFetcher не изменяет память цели.
+* Раскладку (смещения, теги, формат контейнеров) нужно знать заранее. Динамический
+  массив описывается как `{T* data; ...; count}` с данными в первом поле
+  контейнера; другие контейнеры — через `Pointer` + ручной `PointerPath`.
+* Индексы динамических массивов в `Locate()` проверяются на момент вызова. Если
+  массив потом укоротился, `Read()` по сохранённому пути не узнает об этом.
+* Для схем из метаданных `owner_type` — тип объекта, а не родитель, где
+  свойство объявлено: родительские свойства копируются в схему потомка.
+* Чтение живого процесса не атомарно (см. модуль 2).
+
+---
+
 ## Сборка и тесты
 
 ```bash
@@ -338,7 +513,7 @@ cmake --build build -j && ctest --test-dir build --output-on-failure
 ```
 
 ```bash
-./build/scan_demo && ./build/scan_benchmark && ./build/resolver_demo
+./build/scan_demo && ./build/scan_benchmark && ./build/resolver_demo && ./build/property_demo
 ```
 
 * `signature_scanner_tests` и `signature_scanner_tests_scalar` — модуль 1 с SSE2 и
@@ -353,6 +528,17 @@ cmake --build build -j && ctest --test-dir build --output-on-failure
   * кеш, статистика и одновременные `Resolve` из 4 потоков;
   * безопасное чтение собственного процесса: мусорный указатель в таблице и
     строка у границы недоступной страницы.
+* `property_fetcher_tests` — модуль 3:
+  * разбор путей и `Result`, преобразования `Get<T>` с проверкой диапазона;
+  * все типы свойств на побайтовой раскладке: знаковое расширение, битовые поля,
+    UTF-16 строки, имена, вложенные структуры, массивы inline и динамические,
+    32-битные указатели;
+  * наследование, в том числе с циклом в описаниях, и ошибки с подсказками;
+  * `Locate`/`Read` после замены объекта и корень через глобальный указатель;
+  * метаданные рефлексии: связный список и массив дескрипторов, наследники,
+    переопределения, неизвестные теги, циклы, свой `classify`;
+  * параллельные запросы из 4 потоков и чтение реальных структур собственного
+    процесса с мусорным указателем.
 
 Санитайзеры:
 
@@ -361,7 +547,7 @@ cmake -S . -B build-asan -DMEMREFL_SANITIZE=address && cmake --build build-asan 
 ```
 
 ```bash
-cmake -S . -B build-tsan -DMEMREFL_SANITIZE=thread && cmake --build build-tsan -j && ./build-tsan/data_resolver_tests
+cmake -S . -B build-tsan -DMEMREFL_SANITIZE=thread && cmake --build build-tsan -j && ctest --test-dir build-tsan
 ```
 
 Под ASan тест сканирования собственного модуля пропускается. Он намеренно читает

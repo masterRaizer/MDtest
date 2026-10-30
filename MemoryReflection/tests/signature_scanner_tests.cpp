@@ -290,6 +290,11 @@ static void TestReadAndResolveRelative() {
   CHECK(!scanner.Read<std::uint8_t>(base - 1));
   CHECK(!scanner.ResolveRelative(base + 11, 1, 5));
   CHECK(scanner.Contains(base) && scanner.Contains(base, 13) && !scanner.Contains(base, 14));
+
+  // FindUnique + ResolveRelative одним вызовом; неоднозначная сигнатура — nullopt.
+  CHECK(scanner.FindRelativeTarget(Pattern("48 8B 05 ?? ?? ?? ?? C3"), 3, 7) == base + 12 - 0x20);
+  CHECK(!scanner.FindRelativeTarget(Pattern("00"), 0, 4));  // "00" встречается трижды
+  CHECK(!scanner.FindRelativeTarget(Pattern("E8 ?? ?? ?? ?? 48 8B 06"), 1, 5));
 }
 
 // --- PE ----------------------------------------------------------------------
