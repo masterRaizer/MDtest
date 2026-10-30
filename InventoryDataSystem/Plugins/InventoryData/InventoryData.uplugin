@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Inventory Data",
+	"Description": "Item database parsed from DataTables, item visual mapping, auto-filled item ComboBox and a reflection-based resource manager.",
+	"Category": "Gameplay",
+	"CreatedBy": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "InventoryData",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

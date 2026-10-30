@@ -1,0 +1,7 @@
+---,ItemId,DisplayName,Description,Icon,Rarity,bOverrideColor,Color,MaxStack
+Sword_Iron,Sword_Iron,"Железный меч","Простой, но надёжный клинок.",/Game/UI/Icons/T_Sword_Iron.T_Sword_Iron,Common,False,"(R=1.000000,G=1.000000,B=1.000000,A=1.000000)",1
+Bow_Hunter,Bow_Hunter,"Охотничий лук","Лёгкий лук для охоты.",/Game/UI/Icons/T_Bow_Hunter.T_Bow_Hunter,Uncommon,False,"(R=1.000000,G=1.000000,B=1.000000,A=1.000000)",1
+Potion_Health,Potion_Health,"Зелье здоровья","Восстанавливает 50 HP.",/Game/UI/Icons/T_Potion_Health.T_Potion_Health,Common,True,"(R=0.900000,G=0.100000,B=0.100000,A=1.000000)",20
+Gem_Sapphire,Gem_Sapphire,"Сапфир","Ценный камень для крафта.",/Game/UI/Icons/T_Gem_Sapphire.T_Gem_Sapphire,Rare,False,"(R=1.000000,G=1.000000,B=1.000000,A=1.000000)",50
+Staff_Archmage,Staff_Archmage,"Посох архимага","Усиливает заклинания огня.",/Game/UI/Icons/T_Staff_Archmage.T_Staff_Archmage,Epic,False,"(R=1.000000,G=1.000000,B=1.000000,A=1.000000)",1
+Crown_Dragon,Crown_Dragon,"Драконья корона","Реликвия павшего короля.",/Game/UI/Icons/T_Crown_Dragon.T_Crown_Dragon,Legendary,False,"(R=1.000000,G=1.000000,B=1.000000,A=1.000000)",1
