@@ -29,7 +29,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -171,7 +170,7 @@ class GenericDataResolver {
     state.lookups.fetch_add(1, std::memory_order_relaxed);
     const bool use_cache = options_.cache_hits || options_.cache_misses;
     if (use_cache) {
-      std::shared_lock<std::shared_mutex> lock(state.mutex);
+      std::lock_guard<std::mutex> lock(state.mutex);
       const auto it = state.cache.find(id);
       if (it != state.cache.end()) {
         state.cache_hits.fetch_add(1, std::memory_order_relaxed);
@@ -190,7 +189,7 @@ class GenericDataResolver {
     (name ? state.resolved : state.unresolved).fetch_add(1, std::memory_order_relaxed);
 
     if (name ? options_.cache_hits : options_.cache_misses) {
-      std::unique_lock<std::shared_mutex> lock(state.mutex);
+      std::lock_guard<std::mutex> lock(state.mutex);
       if (state.cache.size() >= options_.max_cache_entries) state.cache.clear();
       state.cache.emplace(id, name);
     }
@@ -229,7 +228,7 @@ class GenericDataResolver {
   }
 
   void ClearCache() {
-    std::unique_lock<std::shared_mutex> lock(state_->mutex);
+    std::lock_guard<std::mutex> lock(state_->mutex);
     state_->cache.clear();
   }
 
@@ -249,8 +248,12 @@ class GenericDataResolver {
 
  private:
   // Отдельно от resolver'а, чтобы тот оставался перемещаемым (мьютекс — нет).
+  // Обычный mutex, а не shared_mutex: под ним только поиск в хеш-таблице и
+  // копирование строки. В сборке MinGW (winpthreads) под Wine с
+  // std::shared_mutex 4-поточный тест resolver'а изредка получал nullopt для известных ID,
+  // а тест с тем же шаблоном доступа без memrefl зависал; с std::mutex — нет.
   struct State {
-    std::shared_mutex mutex;
+    std::mutex mutex;
     std::unordered_map<std::uint64_t, std::optional<std::string>> cache;
     std::atomic<std::uint64_t> lookups{0};
     std::atomic<std::uint64_t> cache_hits{0};
