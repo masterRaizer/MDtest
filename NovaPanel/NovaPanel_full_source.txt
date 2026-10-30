@@ -1,0 +1,3314 @@
+================================================================================
+  NOVA PANEL — современный интерфейс на C++20 + Dear ImGui
+  Полный исходный код в одном файле + инструкция
+================================================================================
+
+Этот файл содержит ВСЕ 25 файлов проекта. Каждый файл начинается строкой
+
+    ######## FILE: путь/к/файлу ########
+
+и заканчивается строкой
+
+    ######## END FILE ########
+
+Всё, что между ними, — точное содержимое файла (без этих двух строк).
+
+
+--------------------------------------------------------------------------------
+ 1. СТРУКТУРА ПАПОК (как всё должно лежать)
+--------------------------------------------------------------------------------
+
+NovaPanel/
+├── CMakeLists.txt                 сборка (CMake), скачивает ImGui и при необходимости GLFW
+├── README.md                      краткое описание проекта
+├── src/
+│   ├── main.cpp                   платформа: окно GLFW + рендер OpenGL3
+│   ├── app/
+│   │   ├── Application.h          связывает логику (core) и интерфейс (ui)
+│   │   └── Application.cpp
+│   ├── core/                      МОДЕЛЬ И ЛОГИКА (не зависят от ImGui)
+│   │   ├── AppState.h             все данные приложения
+│   │   ├── AppState.cpp           демо-данные (предметы, локации)
+│   │   ├── Actions.h              список действий (std::variant) + очередь
+│   │   ├── Controller.h           единственный, кто меняет состояние
+│   │   └── Controller.cpp
+│   └── ui/                        ОТРИСОВКА
+│       ├── Theme.h                палитра, ImGuiStyle, шрифты
+│       ├── Theme.cpp
+│       ├── Icons.h                векторные иконки (ImDrawList)
+│       ├── Icons.cpp
+│       ├── Widgets.h              toggle, pillTabs, sidebarButton, Card, ...
+│       ├── Widgets.cpp
+│       ├── MainWindow.h           сайдбар + заголовок + пилюли + контент
+│       ├── MainWindow.cpp
+│       └── pages/
+│           ├── Page.h             интерфейс страницы + 5 классов вкладок
+│           ├── CombatPage.cpp
+│           ├── PlayerPage.cpp
+│           ├── InventoryPage.cpp
+│           ├── ExplorerPage.cpp
+│           └── SettingsPage.cpp
+└── tests/
+    └── smoke_test.cpp             тест без окна и GPU
+
+Создайте папку NovaPanel, внутри неё — папки src, src/app, src/core, src/ui,
+src/ui/pages и tests, и разложите файлы строго по путям из строк "FILE:".
+Пути в #include (например "core/AppState.h") считаются от папки src, поэтому
+менять структуру нельзя.
+
+
+--------------------------------------------------------------------------------
+ 2. КАК РАЗЛОЖИТЬ ФАЙЛЫ
+--------------------------------------------------------------------------------
+
+Вариант А — вручную: для каждого блока создайте файл по указанному пути и
+скопируйте в него текст между строками FILE и END FILE.
+Сохраняйте в кодировке UTF-8.
+
+Вариант Б — автоматически (нужен Python 3). Сохраните этот .txt рядом,
+создайте файл split.py со следующим содержимым и запустите
+"python split.py NovaPanel_full_source.txt":
+
+    import pathlib, sys
+    text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+    out, path, buf = pathlib.Path("NovaPanel"), None, []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("######## FILE: "):
+            path = line[len("######## FILE: "):].rsplit(" ########", 1)[0].strip()
+            buf = []
+        elif line.startswith("######## END FILE ########") and path:
+            dst = out / path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text("".join(buf), encoding="utf-8")
+            print("created", dst)
+            path = None
+        elif path:
+            buf.append(line)
+
+Получится готовая папка NovaPanel со всеми файлами.
+
+
+--------------------------------------------------------------------------------
+ 3. ЧТО НУЖНО УСТАНОВИТЬ
+--------------------------------------------------------------------------------
+
+  * Компилятор с поддержкой C++20 (нужен <format>):
+      - Windows: Visual Studio 2022 (компонент "Разработка классических
+        приложений на C++")
+      - Linux:   GCC 13+ или Clang 16+
+      - macOS:   Xcode 15+ (Apple Clang)
+  * CMake 3.20 или новее
+  * Git (CMake сам скачивает Dear ImGui v1.91.9 и, если нужно, GLFW 3.4)
+  * Интернет при первой сборке
+
+  Linux (Ubuntu/Debian) — системные пакеты:
+      sudo apt install build-essential cmake git libgl-dev libglfw3-dev
+  (если libglfw3-dev не ставить, GLFW скачается и соберётся сам; тогда нужны
+   ещё пакеты X11: libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev
+   libxi-dev)
+
+  Windows и macOS — ничего дополнительно ставить не нужно.
+
+
+--------------------------------------------------------------------------------
+ 4. СБОРКА И ЗАПУСК
+--------------------------------------------------------------------------------
+
+  Откройте терминал в папке NovaPanel и выполните:
+
+      cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      cmake --build build --config Release -j
+
+  Запуск:
+      Linux / macOS:  ./build/nova_panel
+      Windows:        build\Release\nova_panel.exe
+
+  Тесты (без окна и без видеокарты):
+      ctest --test-dir build -C Release --output-on-failure
+
+  Visual Studio: можно просто открыть папку NovaPanel через
+  "Файл -> Открыть -> Папка" — CMake-проект подхватится автоматически.
+
+  Шрифт: программа ищет Segoe UI / Arial / Noto Sans / DejaVu Sans. Для лучшего
+  вида положите Inter-Regular.ttf и Inter-SemiBold.ttf в
+  NovaPanel/assets/fonts/ и запускайте программу из папки NovaPanel.
+
+
+--------------------------------------------------------------------------------
+ 5. КАК УСТРОЕН КОД (кратко)
+--------------------------------------------------------------------------------
+
+  Каждый кадр:
+     Controller::tick(dt)  ->  MainWindow::draw(state, actions)  ->  Controller::process(actions)
+        симуляция              только чтение + намерения              применение и проверка
+
+  * core/ ничего не знает об ImGui. AppState — просто данные.
+  * Страницы (ui/pages) получают const AppState& и не могут его менять.
+    Они редактируют копию настроек ("черновик") и отправляют действие,
+    например action::UpdateCombat{draft}.
+  * Controller проверяет значения (std::clamp) и применяет правила игры:
+    квестовый предмет нельзя выбросить, в неоткрытую локацию нельзя
+    переместиться, зелье лечит игрока и т.д.
+  * Стиль (тёмная тема, скругления, цвета) задаётся в ui/Theme.cpp,
+    функция theme::apply().
+
+  Как добавить новую вкладку:
+    1) создайте класс-наследник ui::Page (см. ui/pages/Page.h);
+    2) добавьте значение в enum PageId (ui/MainWindow.h);
+    3) добавьте std::make_unique<ВашаСтраница>() в конструктор MainWindow
+       и .cpp-файл в список nova_ui в CMakeLists.txt.
+
+
+================================================================================
+  ИСХОДНЫЙ КОД
+================================================================================
+
+
+// [1/25]
+######## FILE: CMakeLists.txt ########
+cmake_minimum_required(VERSION 3.20)
+project(NovaPanel LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(NOVA_BUILD_APP "Build the GLFW/OpenGL executable" ON)
+option(NOVA_BUILD_TESTS "Build headless tests" ON)
+
+include(FetchContent)
+
+# ---- Dear ImGui ---------------------------------------------------------------
+FetchContent_Declare(imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.91.9
+    GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(imgui)
+
+add_library(imgui STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp)
+target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
+
+# ---- Warnings -----------------------------------------------------------------
+add_library(nova_warnings INTERFACE)
+if(MSVC)
+    target_compile_options(nova_warnings INTERFACE /W4 /permissive- /utf-8)
+else()
+    target_compile_options(nova_warnings INTERFACE -Wall -Wextra -Wpedantic)
+endif()
+
+# ---- Core: model + actions + logic (no ImGui) -----------------------------------
+add_library(nova_core STATIC
+    src/core/AppState.cpp
+    src/core/Controller.cpp)
+target_include_directories(nova_core PUBLIC src)
+target_link_libraries(nova_core PRIVATE nova_warnings)
+
+# ---- UI: theme, widgets, pages, layout (ImGui only, no backend) ----------------
+add_library(nova_ui STATIC
+    src/ui/Theme.cpp
+    src/ui/Icons.cpp
+    src/ui/Widgets.cpp
+    src/ui/MainWindow.cpp
+    src/ui/pages/CombatPage.cpp
+    src/ui/pages/PlayerPage.cpp
+    src/ui/pages/InventoryPage.cpp
+    src/ui/pages/ExplorerPage.cpp
+    src/ui/pages/SettingsPage.cpp)
+target_link_libraries(nova_ui PUBLIC nova_core imgui PRIVATE nova_warnings)
+
+# ---- App: wires core and ui together -------------------------------------------
+add_library(nova_app STATIC src/app/Application.cpp)
+target_link_libraries(nova_app PUBLIC nova_ui PRIVATE nova_warnings)
+
+# ---- Executable: GLFW + OpenGL3 backend ---------------------------------------
+if(NOVA_BUILD_APP)
+    find_package(OpenGL REQUIRED)
+    find_package(glfw3 3.3 QUIET)
+    if(NOT glfw3_FOUND)
+        set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+        set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(glfw
+            GIT_REPOSITORY https://github.com/glfw/glfw.git
+            GIT_TAG        3.4
+            GIT_SHALLOW    TRUE)
+        FetchContent_MakeAvailable(glfw)
+    endif()
+
+    add_library(imgui_backend STATIC
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
+    target_include_directories(imgui_backend PUBLIC ${imgui_SOURCE_DIR}/backends)
+    target_link_libraries(imgui_backend PUBLIC imgui glfw OpenGL::GL)
+
+    add_executable(nova_panel src/main.cpp)
+    target_link_libraries(nova_panel PRIVATE nova_app imgui_backend nova_warnings)
+endif()
+
+# ---- Tests ----------------------------------------------------------------------
+if(NOVA_BUILD_TESTS)
+    enable_testing()
+    add_executable(nova_smoke_test tests/smoke_test.cpp)
+    target_link_libraries(nova_smoke_test PRIVATE nova_app nova_warnings)
+    add_test(NAME smoke COMMAND nova_smoke_test)
+endif()
+######## END FILE ########
+
+// [2/25]
+######## FILE: src/main.cpp ########
+// Platform layer: GLFW window + OpenGL 3 renderer for Dear ImGui.
+// Everything application-specific lives in app::Application.
+
+#include "app/Application.h"
+#include "ui/Theme.h"
+
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
+
+#include <GLFW/glfw3.h>
+
+#include <chrono>
+#include <cstdio>
+#include <thread>
+
+namespace {
+
+void glfwErrorCallback(int error, const char* description) {
+    std::fprintf(stderr, "GLFW error %d: %s\n", error, description);
+}
+
+}  // namespace
+
+int main() {
+    glfwSetErrorCallback(glfwErrorCallback);
+    if (!glfwInit()) return 1;
+
+#if defined(__APPLE__)
+    const char* glslVersion = "#version 150";
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+#else
+    const char* glslVersion = "#version 130";
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+#endif
+
+    GLFWwindow* window = glfwCreateWindow(1280, 800, "Nova Panel", nullptr, nullptr);
+    if (!window) {
+        glfwTerminate();
+        return 1;
+    }
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.IniFilename = nullptr;
+
+    ui::theme::loadFonts(io);
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init(glslVersion);
+
+    {
+        app::Application application;
+        bool vsync = true;
+
+        while (!glfwWindowShouldClose(window)) {
+            const auto frameStart = std::chrono::steady_clock::now();
+            glfwPollEvents();
+            if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
+                ImGui_ImplGlfw_Sleep(10);
+                continue;
+            }
+
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+            application.frame(io.DeltaTime);
+            ImGui::Render();
+
+            int width = 0, height = 0;
+            glfwGetFramebufferSize(window, &width, &height);
+            glViewport(0, 0, width, height);
+            const ImVec4 bg = ui::theme::palette().background;
+            glClearColor(bg.x, bg.y, bg.z, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            glfwSwapBuffers(window);
+
+            // Apply platform-level settings coming from the state.
+            const core::GeneralSettings& general = application.state().settings.general;
+            if (general.vsync != vsync) {
+                vsync = general.vsync;
+                glfwSwapInterval(vsync ? 1 : 0);
+            }
+            const int fpsLimit = core::kFpsLimitValues[static_cast<std::size_t>(general.fpsLimit)];
+            if (!vsync && fpsLimit > 0)
+                std::this_thread::sleep_until(frameStart + std::chrono::microseconds(1'000'000 / fpsLimit));
+        }
+    }
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
+}
+######## END FILE ########
+
+// [3/25]
+######## FILE: src/app/Application.h ########
+#pragma once
+
+// Wires model, logic and view together and defines the order of a frame:
+//   1. Controller::tick      - simulation
+//   2. MainWindow::draw      - read-only rendering, user intent -> ActionQueue
+//   3. Controller::process   - actions are applied to the state
+
+#include "core/Actions.h"
+#include "core/AppState.h"
+#include "core/Controller.h"
+#include "ui/MainWindow.h"
+
+namespace app {
+
+class Application {
+public:
+    Application();
+
+    // Call between ImGui::NewFrame() and ImGui::Render().
+    void frame(float dt);
+
+    [[nodiscard]] const core::AppState& state() const { return m_state; }
+    [[nodiscard]] ui::MainWindow& window() { return m_window; }
+    [[nodiscard]] core::Controller& controller() { return m_controller; }
+
+private:
+    core::AppState m_state;
+    core::ActionQueue m_actions;
+    core::Controller m_controller;
+    ui::MainWindow m_window;
+};
+
+}  // namespace app
+######## END FILE ########
+
+// [4/25]
+######## FILE: src/app/Application.cpp ########
+#include "app/Application.h"
+
+#include "ui/Theme.h"
+
+namespace app {
+
+Application::Application() : m_state(core::makeDemoState()), m_controller(m_state) {
+    m_controller.onAppearanceChanged = [](const core::AppearanceSettings& appearance) { ui::theme::apply(appearance); };
+    ui::theme::apply(m_state.settings.appearance);
+}
+
+void Application::frame(float dt) {
+    m_controller.tick(dt);
+    m_window.draw(m_state, m_actions);
+    m_controller.process(m_actions);
+}
+
+}  // namespace app
+######## END FILE ########
+
+// [5/25]
+######## FILE: src/core/AppState.h ########
+#pragma once
+
+// Domain model. Plain data only: no ImGui, no rendering, no behaviour.
+// The UI reads it through a const reference; only core::Controller writes it.
+
+#include <array>
+#include <cstdint>
+#include <deque>
+#include <string>
+#include <vector>
+
+namespace core {
+
+// ---------------------------------------------------------------- Combat ----
+
+inline constexpr std::array kDifficulties{"Story", "Normal", "Hard", "Nightmare"};
+inline constexpr std::array kTargetPriorities{"Nearest", "Lowest health", "Strongest", "Last attacker"};
+inline constexpr std::array kDamageNumberStyles{"Classic", "Floating", "Stacked", "Minimal"};
+
+struct CombatSettings {
+    // General
+    bool autoAttack = false;
+    bool autoBlock = true;
+    int difficulty = 1;
+    float attackSpeed = 1.0f;  // x multiplier
+    int comboLength = 3;
+
+    // Targeting
+    int targetPriority = 0;
+    bool targetLock = true;
+    bool ignoreNeutral = true;
+    float lockRange = 25.0f;  // metres
+
+    // Feedback
+    bool damageNumbers = true;
+    bool hitMarkers = true;
+    int damageNumberStyle = 1;
+    float screenShake = 0.5f;  // 0..1
+    float hitStopMs = 60.0f;
+};
+
+// ---------------------------------------------------------------- Player ----
+
+inline constexpr std::array kPlayerClasses{"Warrior", "Ranger", "Mage", "Rogue"};
+inline constexpr std::array kCameraModes{"Third person", "First person", "Top-down"};
+
+struct PlayerSettings {
+    // Stats
+    int playerClass = 0;
+    int level = 10;  // maxHealth = 80 + level * 2
+    float health = 74.0f;
+    float maxHealth = 100.0f;
+    float stamina = 100.0f;
+    float maxStamina = 100.0f;
+    bool godMode = false;
+    bool infiniteStamina = false;
+    bool healthRegen = true;
+
+    // Movement
+    float moveSpeed = 1.0f;
+    float jumpHeight = 1.0f;
+    float sprintMultiplier = 1.6f;
+    bool autoSprint = false;
+    bool flyMode = false;
+
+    // Camera
+    int cameraMode = 0;
+    float fov = 90.0f;
+    float sensitivity = 1.0f;
+    bool invertY = false;
+    bool headBob = true;
+};
+
+// ------------------------------------------------------------- Inventory ----
+
+enum class ItemCategory : std::uint8_t { Weapon, Armor, Consumable, Material, Quest, Count };
+enum class Rarity : std::uint8_t { Common, Uncommon, Rare, Epic, Legendary, Count };
+
+inline constexpr std::array kItemCategoryNames{"Weapon", "Armor", "Consumable", "Material", "Quest"};
+inline constexpr std::array kRarityNames{"Common", "Uncommon", "Rare", "Epic", "Legendary"};
+inline constexpr std::array kSortModes{"Name", "Rarity", "Category", "Weight"};
+inline constexpr std::array kLootFilters{"Everything", "Uncommon+", "Rare+", "Epic+"};
+
+struct Item {
+    int id = 0;
+    std::string name;
+    ItemCategory category = ItemCategory::Material;
+    Rarity rarity = Rarity::Common;
+    int quantity = 1;
+    float weight = 0.0f;  // per unit, kg
+    bool equipped = false;
+};
+
+struct InventoryPrefs {
+    int sortMode = 1;
+    bool sortDescending = true;
+    bool autoLoot = true;
+    bool autoSortOnPickup = true;
+    int lootFilter = 0;
+    bool confirmDrop = true;
+};
+
+struct InventoryState {
+    std::vector<Item> items;
+    float maxWeight = 60.0f;
+    InventoryPrefs prefs;
+    int nextItemId = 1;
+};
+
+// -------------------------------------------------------------- Explorer ----
+
+inline constexpr std::array kWeatherTypes{"Clear", "Cloudy", "Rain", "Storm", "Snow", "Fog"};
+
+struct Vec3 {
+    float x = 0, y = 0, z = 0;
+};
+
+struct Location {
+    std::string name;
+    std::string region;
+    Vec3 position;
+    bool discovered = false;
+};
+
+struct WorldSettings {
+    float timeOfDay = 14.5f;  // hours, [0, 24)
+    float timeScale = 60.0f;  // in-game minutes per real second
+    bool freezeTime = false;
+    int weather = 0;
+    bool fogOfWar = true;
+    bool showMinimap = true;
+    float minimapZoom = 1.0f;
+    float renderDistance = 800.0f;  // metres
+};
+
+struct ExplorerState {
+    std::vector<Location> locations;
+    int currentLocation = 0;
+    WorldSettings world;
+};
+
+// -------------------------------------------------------------- Settings ----
+
+inline constexpr std::array kAccentNames{"Violet", "Azure", "Emerald", "Amber", "Rose"};
+inline constexpr std::array kLanguages{"English", "Russian", "Deutsch", "Español"};
+inline constexpr std::array kFpsLimits{"30", "60", "120", "144", "Unlimited"};
+inline constexpr std::array kFpsLimitValues{30, 60, 120, 144, 0};
+
+struct AppearanceSettings {
+    int accent = 0;
+    float uiScale = 1.0f;
+    float rounding = 8.0f;
+    bool animations = true;
+
+    bool operator==(const AppearanceSettings&) const = default;
+};
+
+struct GeneralSettings {
+    int language = 0;
+    bool vsync = true;
+    int fpsLimit = 1;
+    bool showFpsOverlay = false;
+    bool confirmDestructive = true;
+};
+
+struct AppSettings {
+    AppearanceSettings appearance;
+    GeneralSettings general;
+};
+
+// ------------------------------------------------------------------- Log ----
+
+enum class LogLevel : std::uint8_t { Info, Success, Warning, Error };
+
+struct LogEntry {
+    double timestamp = 0.0;  // seconds since start
+    LogLevel level = LogLevel::Info;
+    std::string message;
+};
+
+// ------------------------------------------------------------------ Root ----
+
+struct AppState {
+    CombatSettings combat;
+    PlayerSettings player;
+    InventoryState inventory;
+    ExplorerState explorer;
+    AppSettings settings;
+
+    std::deque<LogEntry> log;  // newest at the back
+    double clock = 0.0;        // seconds since start
+};
+
+// Initial state populated with demo content.
+[[nodiscard]] AppState makeDemoState();
+
+// Derived values. Pure functions of the model, usable from UI and logic alike.
+[[nodiscard]] float totalWeight(const InventoryState& inventory);
+[[nodiscard]] float distance(const Vec3& a, const Vec3& b);
+
+}  // namespace core
+######## END FILE ########
+
+// [6/25]
+######## FILE: src/core/AppState.cpp ########
+#include "core/AppState.h"
+
+#include <cmath>
+#include <numeric>
+
+namespace core {
+
+AppState makeDemoState() {
+    AppState state;
+
+    auto& inv = state.inventory;
+    auto add = [&inv](std::string name, ItemCategory cat, Rarity rarity, int qty, float weight, bool equipped = false) {
+        inv.items.push_back(Item{
+            .id = inv.nextItemId++,
+            .name = std::move(name),
+            .category = cat,
+            .rarity = rarity,
+            .quantity = qty,
+            .weight = weight,
+            .equipped = equipped,
+        });
+    };
+    add("Stormcaller Blade", ItemCategory::Weapon, Rarity::Legendary, 1, 4.2f, true);
+    add("Hunter's Longbow", ItemCategory::Weapon, Rarity::Rare, 1, 2.1f);
+    add("Reinforced Leather", ItemCategory::Armor, Rarity::Uncommon, 1, 6.5f, true);
+    add("Health Potion", ItemCategory::Consumable, Rarity::Common, 6, 0.3f);
+    add("Elixir of Vigor", ItemCategory::Consumable, Rarity::Epic, 2, 0.4f);
+    add("Iron Ore", ItemCategory::Material, Rarity::Common, 14, 0.8f);
+    add("Dragon Scale", ItemCategory::Material, Rarity::Epic, 3, 1.2f);
+    add("Ancient Map Fragment", ItemCategory::Quest, Rarity::Rare, 1, 0.1f);
+
+    auto& locs = state.explorer.locations;
+    locs = {
+        {"Silverbrook Village", "Meadowlands", {0, 0, 0}, true},
+        {"Whispering Woods", "Meadowlands", {320, 12, -180}, true},
+        {"Ashen Crossing", "Badlands", {-540, 4, 260}, true},
+        {"Sunken Temple", "Mirefen Marsh", {780, -18, 640}, false},
+        {"Frostpeak Summit", "Highlands", {-120, 940, -1320}, true},
+        {"Ironhold Keep", "Highlands", {210, 380, -960}, false},
+        {"Obsidian Spire", "Badlands", {-1180, 220, 880}, false},
+    };
+
+    state.log.push_back({0.0, LogLevel::Info, "Session started"});
+    return state;
+}
+
+float totalWeight(const InventoryState& inventory) {
+    return std::accumulate(inventory.items.begin(), inventory.items.end(), 0.0f,
+                           [](float sum, const Item& item) { return sum + item.weight * static_cast<float>(item.quantity); });
+}
+
+float distance(const Vec3& a, const Vec3& b) {
+    const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+}  // namespace core
+######## END FILE ########
+
+// [7/25]
+######## FILE: src/core/Actions.h ########
+#pragma once
+
+// Everything the UI can ask the application to do.
+// Views never mutate core::AppState directly: they emit one of these actions
+// and core::Controller decides how (and whether) to apply it.
+
+#include "core/AppState.h"
+
+#include <utility>
+#include <variant>
+#include <vector>
+
+namespace core {
+
+namespace action {
+
+// "Draft" updates: the view edits a copy of a settings block and hands it back.
+// The controller validates (clamps) it before committing.
+struct UpdateCombat { CombatSettings value; };
+struct UpdatePlayer { PlayerSettings value; };
+struct UpdateWorld { WorldSettings value; };
+struct UpdateInventoryPrefs { InventoryPrefs value; };
+struct UpdateAppearance { AppearanceSettings value; };
+struct UpdateGeneral { GeneralSettings value; };
+
+// Commands.
+struct HealPlayer {};
+struct ResetPlayer {};
+struct UseItem { int itemId; };
+struct DropItem { int itemId; };
+struct SpawnRandomItem {};
+struct SortInventory {};
+struct TeleportTo { int locationIndex; };
+struct RevealAllLocations {};
+struct ResetAllSettings {};
+struct ClearLog {};
+
+}  // namespace action
+
+using Action = std::variant<
+    action::UpdateCombat,
+    action::UpdatePlayer,
+    action::UpdateWorld,
+    action::UpdateInventoryPrefs,
+    action::UpdateAppearance,
+    action::UpdateGeneral,
+    action::HealPlayer,
+    action::ResetPlayer,
+    action::UseItem,
+    action::DropItem,
+    action::SpawnRandomItem,
+    action::SortInventory,
+    action::TeleportTo,
+    action::RevealAllLocations,
+    action::ResetAllSettings,
+    action::ClearLog>;
+
+// Write-only interface given to views. Keeps the UI unaware of who handles actions.
+class ActionSink {
+public:
+    virtual ~ActionSink() = default;
+    virtual void dispatch(Action action) = 0;
+};
+
+// Actions are queued during the frame and applied after the UI has been drawn,
+// so the state stays consistent for the whole frame.
+class ActionQueue final : public ActionSink {
+public:
+    void dispatch(Action action) override { m_pending.push_back(std::move(action)); }
+
+    [[nodiscard]] std::vector<Action> drain() { return std::exchange(m_pending, {}); }
+    [[nodiscard]] bool empty() const { return m_pending.empty(); }
+
+private:
+    std::vector<Action> m_pending;
+};
+
+}  // namespace core
+######## END FILE ########
+
+// [8/25]
+######## FILE: src/core/Controller.h ########
+#pragma once
+
+// Application logic. The only place where core::AppState is modified.
+// Has no dependency on ImGui, so it can be unit-tested headlessly.
+
+#include "core/Actions.h"
+#include "core/AppState.h"
+
+#include <cstddef>
+#include <functional>
+#include <random>
+#include <string>
+
+namespace core {
+
+class Controller {
+public:
+    explicit Controller(AppState& state);
+
+    // Called whenever the appearance settings change (the platform layer re-applies the theme).
+    std::function<void(const AppearanceSettings&)> onAppearanceChanged;
+
+    void handle(const Action& action);
+    void process(ActionQueue& queue);
+
+    // Per-frame simulation (time of day, regeneration, ...).
+    void tick(float dt);
+
+private:
+    void apply(const action::UpdateCombat& a);
+    void apply(const action::UpdatePlayer& a);
+    void apply(const action::UpdateWorld& a);
+    void apply(const action::UpdateInventoryPrefs& a);
+    void apply(const action::UpdateAppearance& a);
+    void apply(const action::UpdateGeneral& a);
+    void apply(const action::HealPlayer& a);
+    void apply(const action::ResetPlayer& a);
+    void apply(const action::UseItem& a);
+    void apply(const action::DropItem& a);
+    void apply(const action::SpawnRandomItem& a);
+    void apply(const action::SortInventory& a);
+    void apply(const action::TeleportTo& a);
+    void apply(const action::RevealAllLocations& a);
+    void apply(const action::ResetAllSettings& a);
+    void apply(const action::ClearLog& a);
+
+    void sortInventory();
+    void log(LogLevel level, std::string message);
+
+    static constexpr std::size_t kMaxLogEntries = 200;
+
+    AppState& m_state;
+    std::mt19937 m_rng{42};
+};
+
+}  // namespace core
+######## END FILE ########
+
+// [9/25]
+######## FILE: src/core/Controller.cpp ########
+#include "core/Controller.h"
+
+#include <algorithm>
+#include <cmath>
+#include <format>
+#include <iterator>
+
+namespace core {
+
+namespace {
+
+template <class T>
+constexpr T clampIndex(T value, std::size_t count) {
+    return std::clamp<T>(value, 0, static_cast<T>(count) - 1);
+}
+
+constexpr auto idx(auto e) { return static_cast<std::size_t>(e); }
+
+}  // namespace
+
+Controller::Controller(AppState& state) : m_state(state) { sortInventory(); }
+
+void Controller::handle(const Action& action) {
+    std::visit([this](const auto& a) { apply(a); }, action);
+}
+
+void Controller::process(ActionQueue& queue) {
+    for (const Action& action : queue.drain()) handle(action);
+}
+
+void Controller::tick(float dt) {
+    m_state.clock += dt;
+
+    auto& world = m_state.explorer.world;
+    if (!world.freezeTime) {
+        world.timeOfDay = std::fmod(world.timeOfDay + dt * world.timeScale / 60.0f, 24.0f);
+    }
+
+    auto& p = m_state.player;
+    if (p.healthRegen && p.health < p.maxHealth) p.health = std::min(p.maxHealth, p.health + 1.5f * dt);
+    if (p.infiniteStamina) p.stamina = p.maxStamina;
+    else if (p.stamina < p.maxStamina) p.stamina = std::min(p.maxStamina, p.stamina + 8.0f * dt);
+}
+
+// ------------------------------------------------------------- Settings ----
+
+void Controller::apply(const action::UpdateCombat& a) {
+    CombatSettings v = a.value;
+    v.difficulty = clampIndex(v.difficulty, kDifficulties.size());
+    v.targetPriority = clampIndex(v.targetPriority, kTargetPriorities.size());
+    v.damageNumberStyle = clampIndex(v.damageNumberStyle, kDamageNumberStyles.size());
+    v.attackSpeed = std::clamp(v.attackSpeed, 0.25f, 3.0f);
+    v.comboLength = std::clamp(v.comboLength, 1, 10);
+    v.lockRange = std::clamp(v.lockRange, 5.0f, 100.0f);
+    v.screenShake = std::clamp(v.screenShake, 0.0f, 1.0f);
+    v.hitStopMs = std::clamp(v.hitStopMs, 0.0f, 250.0f);
+
+    if (v.difficulty != m_state.combat.difficulty)
+        log(LogLevel::Info, std::format("Difficulty set to {}", kDifficulties[idx(v.difficulty)]));
+    m_state.combat = v;
+}
+
+void Controller::apply(const action::UpdatePlayer& a) {
+    PlayerSettings v = a.value;
+    v.playerClass = clampIndex(v.playerClass, kPlayerClasses.size());
+    v.cameraMode = clampIndex(v.cameraMode, kCameraModes.size());
+    v.level = std::clamp(v.level, 1, 100);
+    v.maxHealth = 80.0f + static_cast<float>(v.level) * 2.0f;
+    v.health = std::clamp(v.health, 0.0f, v.maxHealth);
+    v.stamina = std::clamp(v.stamina, 0.0f, v.maxStamina);
+    v.moveSpeed = std::clamp(v.moveSpeed, 0.25f, 3.0f);
+    v.jumpHeight = std::clamp(v.jumpHeight, 0.5f, 3.0f);
+    v.sprintMultiplier = std::clamp(v.sprintMultiplier, 1.0f, 3.0f);
+    v.fov = std::clamp(v.fov, 60.0f, 120.0f);
+    v.sensitivity = std::clamp(v.sensitivity, 0.1f, 5.0f);
+
+    if (v.godMode != m_state.player.godMode)
+        log(LogLevel::Warning, v.godMode ? "God mode enabled" : "God mode disabled");
+    if (v.playerClass != m_state.player.playerClass)
+        log(LogLevel::Info, std::format("Class changed to {}", kPlayerClasses[idx(v.playerClass)]));
+    m_state.player = v;
+}
+
+void Controller::apply(const action::UpdateWorld& a) {
+    WorldSettings v = a.value;
+    v.weather = clampIndex(v.weather, kWeatherTypes.size());
+    v.timeOfDay = std::clamp(v.timeOfDay, 0.0f, 23.99f);
+    v.timeScale = std::clamp(v.timeScale, 1.0f, 600.0f);
+    v.minimapZoom = std::clamp(v.minimapZoom, 0.5f, 4.0f);
+    v.renderDistance = std::clamp(v.renderDistance, 100.0f, 3000.0f);
+
+    if (v.weather != m_state.explorer.world.weather)
+        log(LogLevel::Info, std::format("Weather changed to {}", kWeatherTypes[idx(v.weather)]));
+    m_state.explorer.world = v;
+}
+
+void Controller::apply(const action::UpdateInventoryPrefs& a) {
+    InventoryPrefs v = a.value;
+    v.sortMode = clampIndex(v.sortMode, kSortModes.size());
+    v.lootFilter = clampIndex(v.lootFilter, kLootFilters.size());
+
+    const bool resort = v.sortMode != m_state.inventory.prefs.sortMode ||
+                        v.sortDescending != m_state.inventory.prefs.sortDescending;
+    m_state.inventory.prefs = v;
+    if (resort) sortInventory();
+}
+
+void Controller::apply(const action::UpdateAppearance& a) {
+    AppearanceSettings v = a.value;
+    v.accent = clampIndex(v.accent, kAccentNames.size());
+    v.uiScale = std::clamp(v.uiScale, 0.75f, 1.75f);
+    v.rounding = std::clamp(v.rounding, 0.0f, 16.0f);
+
+    if (v == m_state.settings.appearance) return;
+    m_state.settings.appearance = v;
+    if (onAppearanceChanged) onAppearanceChanged(v);
+}
+
+void Controller::apply(const action::UpdateGeneral& a) {
+    GeneralSettings v = a.value;
+    v.language = clampIndex(v.language, kLanguages.size());
+    v.fpsLimit = clampIndex(v.fpsLimit, kFpsLimits.size());
+    m_state.settings.general = v;
+}
+
+void Controller::apply(const action::ResetAllSettings&) {
+    const AppState defaults;
+    m_state.combat = defaults.combat;
+    m_state.inventory.prefs = defaults.inventory.prefs;
+    m_state.explorer.world = defaults.explorer.world;
+    m_state.settings = defaults.settings;
+    if (onAppearanceChanged) onAppearanceChanged(m_state.settings.appearance);
+    log(LogLevel::Success, "All settings restored to defaults");
+}
+
+// --------------------------------------------------------------- Player ----
+
+void Controller::apply(const action::HealPlayer&) {
+    m_state.player.health = m_state.player.maxHealth;
+    m_state.player.stamina = m_state.player.maxStamina;
+    log(LogLevel::Success, "Player fully restored");
+}
+
+void Controller::apply(const action::ResetPlayer&) {
+    m_state.player = PlayerSettings{};
+    log(LogLevel::Info, "Player settings reset");
+}
+
+// ------------------------------------------------------------ Inventory ----
+
+void Controller::apply(const action::UseItem& a) {
+    auto& items = m_state.inventory.items;
+    const auto it = std::ranges::find(items, a.itemId, &Item::id);
+    if (it == items.end()) return;
+
+    switch (it->category) {
+        case ItemCategory::Weapon:
+        case ItemCategory::Armor:
+            // Only one item per slot can be equipped.
+            if (!it->equipped)
+                for (Item& other : items)
+                    if (other.category == it->category) other.equipped = false;
+            it->equipped = !it->equipped;
+            log(LogLevel::Info, std::format("{} {}", it->equipped ? "Equipped" : "Unequipped", it->name));
+            break;
+
+        case ItemCategory::Consumable: {
+            const float heal = 15.0f * static_cast<float>(idx(it->rarity) + 1);
+            auto& p = m_state.player;
+            p.health = std::min(p.maxHealth, p.health + heal);
+            log(LogLevel::Success, std::format("Used {} (+{:.0f} HP)", it->name, heal));
+            if (--it->quantity <= 0) items.erase(it);
+            break;
+        }
+
+        default:
+            log(LogLevel::Warning, std::format("{} can't be used directly", it->name));
+            break;
+    }
+}
+
+void Controller::apply(const action::DropItem& a) {
+    auto& items = m_state.inventory.items;
+    const auto it = std::ranges::find(items, a.itemId, &Item::id);
+    if (it == items.end()) return;
+
+    if (it->category == ItemCategory::Quest) {
+        log(LogLevel::Error, std::format("Quest item '{}' can't be dropped", it->name));
+        return;
+    }
+    log(LogLevel::Info, std::format("Dropped {} x{}", it->name, it->quantity));
+    items.erase(it);
+}
+
+void Controller::apply(const action::SpawnRandomItem&) {
+    static constexpr std::array kNames{
+        "Rusty Dagger", "Oak Shield", "Moonpetal Herb", "Silver Ingot", "Phoenix Feather",
+        "Warden's Helm", "Bread Loaf", "Runed Gemstone", "Venom Flask", "Spellbound Staff",
+    };
+    static constexpr std::array kCategories{
+        ItemCategory::Weapon, ItemCategory::Armor, ItemCategory::Consumable, ItemCategory::Material, ItemCategory::Material,
+        ItemCategory::Armor, ItemCategory::Consumable, ItemCategory::Material, ItemCategory::Consumable, ItemCategory::Weapon,
+    };
+    static_assert(kNames.size() == kCategories.size());
+
+    auto& inv = m_state.inventory;
+    const std::size_t pick = std::uniform_int_distribution<std::size_t>(0, kNames.size() - 1)(m_rng);
+    // Skewed towards common items: 40/28/18/10/4 %.
+    const auto rarity = static_cast<Rarity>(std::discrete_distribution<int>({40, 28, 18, 10, 4})(m_rng));
+
+    if (static_cast<int>(rarity) < inv.prefs.lootFilter) {
+        log(LogLevel::Info, std::format("Skipped {} ({}) - below loot filter", kNames[pick], kRarityNames[idx(rarity)]));
+        return;
+    }
+
+    const float weight = std::uniform_real_distribution<float>(0.2f, 5.0f)(m_rng);
+    if (totalWeight(inv) + weight > inv.maxWeight) {
+        log(LogLevel::Error, "Inventory is too heavy to pick up more items");
+        return;
+    }
+
+    inv.items.push_back(Item{
+        .id = inv.nextItemId++,
+        .name = kNames[pick],
+        .category = kCategories[pick],
+        .rarity = rarity,
+        .quantity = 1,
+        .weight = weight,
+    });
+    log(LogLevel::Success, std::format("Picked up {} ({})", kNames[pick], kRarityNames[idx(rarity)]));
+    if (inv.prefs.autoSortOnPickup) sortInventory();
+}
+
+void Controller::apply(const action::SortInventory&) {
+    sortInventory();
+    log(LogLevel::Info, std::format("Inventory sorted by {}", kSortModes[idx(m_state.inventory.prefs.sortMode)]));
+}
+
+void Controller::sortInventory() {
+    const auto& prefs = m_state.inventory.prefs;
+    auto less = [mode = prefs.sortMode](const Item& a, const Item& b) {
+        switch (mode) {
+            case 0: return a.name < b.name;
+            case 1: return a.rarity < b.rarity;
+            case 2: return a.category < b.category;
+            default: return a.weight * a.quantity < b.weight * b.quantity;
+        }
+    };
+    auto& items = m_state.inventory.items;
+    if (prefs.sortDescending)
+        std::ranges::stable_sort(items, [&](const Item& a, const Item& b) { return less(b, a); });
+    else
+        std::ranges::stable_sort(items, less);
+}
+
+// ------------------------------------------------------------- Explorer ----
+
+void Controller::apply(const action::TeleportTo& a) {
+    auto& ex = m_state.explorer;
+    if (a.locationIndex < 0 || a.locationIndex >= static_cast<int>(ex.locations.size())) return;
+
+    const Location& target = ex.locations[static_cast<std::size_t>(a.locationIndex)];
+    if (!target.discovered) {
+        log(LogLevel::Error, std::format("{} is not discovered yet", target.name));
+        return;
+    }
+    if (a.locationIndex == ex.currentLocation) return;
+
+    ex.currentLocation = a.locationIndex;
+    log(LogLevel::Success, std::format("Travelled to {}", target.name));
+}
+
+void Controller::apply(const action::RevealAllLocations&) {
+    auto& locations = m_state.explorer.locations;
+    const auto hidden = std::ranges::count(locations, false, &Location::discovered);
+    for (Location& l : locations) l.discovered = true;
+    log(LogLevel::Success, std::format("Revealed {} location(s)", hidden));
+}
+
+// ------------------------------------------------------------------ Log ----
+
+void Controller::apply(const action::ClearLog&) { m_state.log.clear(); }
+
+void Controller::log(LogLevel level, std::string message) {
+    m_state.log.push_back({m_state.clock, level, std::move(message)});
+    while (m_state.log.size() > kMaxLogEntries) m_state.log.pop_front();
+}
+
+}  // namespace core
+######## END FILE ########
+
+// [10/25]
+######## FILE: src/ui/Theme.h ########
+#pragma once
+
+// Visual identity: colour palette, ImGuiStyle parameters and fonts.
+
+#include "core/AppState.h"
+
+#include <imgui.h>
+
+namespace ui::theme {
+
+struct Palette {
+    // Neutrals (dark theme)
+    ImVec4 background{0.051f, 0.055f, 0.071f, 1.00f};  // #0D0E12  app background
+    ImVec4 sidebar{0.067f, 0.071f, 0.090f, 1.00f};     // #111217  sidebar
+    ImVec4 surface{0.090f, 0.094f, 0.118f, 1.00f};     // #17181E  cards
+    ImVec4 surfaceHi{0.129f, 0.133f, 0.165f, 1.00f};   // #21222A  inputs / frames
+    ImVec4 surfaceTop{0.169f, 0.176f, 0.216f, 1.00f};  // #2B2D37  hovered frames
+    ImVec4 border{1.00f, 1.00f, 1.00f, 0.06f};
+    ImVec4 text{0.925f, 0.933f, 0.953f, 1.00f};       // #ECEEF3
+    ImVec4 textMuted{0.541f, 0.561f, 0.627f, 1.00f};  // #8A8FA0
+    ImVec4 textDisabled{0.353f, 0.369f, 0.420f, 1.00f};
+
+    // Accent (driven by AppearanceSettings::accent)
+    ImVec4 accent{0.486f, 0.361f, 1.000f, 1.00f};  // #7C5CFF
+    ImVec4 accentHover;
+    ImVec4 accentActive;
+    ImVec4 accentSoft;  // translucent accent for selected backgrounds
+
+    // Semantic
+    ImVec4 success{0.239f, 0.839f, 0.549f, 1.00f};  // #3DD68C
+    ImVec4 warning{0.961f, 0.710f, 0.267f, 1.00f};  // #F5B544
+    ImVec4 danger{0.949f, 0.333f, 0.353f, 1.00f};   // #F2555A
+};
+
+struct Fonts {
+    ImFont* body = nullptr;
+    ImFont* heading = nullptr;  // page titles
+    ImFont* strong = nullptr;   // card titles
+    ImFont* small = nullptr;    // captions, badges
+};
+
+// Accent colour presets, indexed by AppearanceSettings::accent (see core::kAccentNames).
+[[nodiscard]] ImVec4 accentPreset(int index);
+
+[[nodiscard]] const Palette& palette();
+[[nodiscard]] const Fonts& fonts();
+[[nodiscard]] bool animationsEnabled();
+
+// Loads a system UI font (falls back to the ImGui default font). Call once before the first frame.
+void loadFonts(ImGuiIO& io);
+
+// Rebuilds the whole ImGuiStyle from scratch. Safe to call at any time.
+void apply(const core::AppearanceSettings& appearance);
+
+// Colour of a rarity tier (Common..Legendary).
+[[nodiscard]] ImVec4 rarityColor(core::Rarity rarity);
+
+[[nodiscard]] ImVec4 withAlpha(ImVec4 c, float alpha);
+[[nodiscard]] ImVec4 lerp(const ImVec4& a, const ImVec4& b, float t);
+
+}  // namespace ui::theme
+######## END FILE ########
+
+// [11/25]
+######## FILE: src/ui/Theme.cpp ########
+#include "ui/Theme.h"
+
+#include <algorithm>
+#include <array>
+#include <filesystem>
+#include <string_view>
+
+namespace ui::theme {
+
+namespace {
+
+Palette g_palette;
+Fonts g_fonts;
+bool g_animations = true;
+
+struct FontPair {
+    std::string_view regular;
+    std::string_view bold;
+};
+
+// First existing pair wins. Drop Inter into assets/fonts/ for the intended look.
+constexpr std::array kFontCandidates{
+    FontPair{"assets/fonts/Inter-Regular.ttf", "assets/fonts/Inter-SemiBold.ttf"},
+    FontPair{"C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/seguisb.ttf"},
+    FontPair{"/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"},
+    FontPair{"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-SemiBold.ttf"},
+    FontPair{"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"},
+};
+
+constexpr std::array kAccents{
+    ImVec4{0.486f, 0.361f, 1.000f, 1.0f},  // Violet  #7C5CFF
+    ImVec4{0.231f, 0.510f, 0.965f, 1.0f},  // Azure   #3B82F6
+    ImVec4{0.063f, 0.725f, 0.506f, 1.0f},  // Emerald #10B981
+    ImVec4{0.961f, 0.620f, 0.043f, 1.0f},  // Amber   #F59E0B
+    ImVec4{0.957f, 0.247f, 0.369f, 1.0f},  // Rose    #F43F5E
+};
+static_assert(kAccents.size() == core::kAccentNames.size());
+
+bool exists(std::string_view path) {
+    std::error_code ec;
+    return std::filesystem::exists(std::filesystem::path(path), ec);
+}
+
+}  // namespace
+
+ImVec4 accentPreset(int index) {
+    return kAccents[static_cast<std::size_t>(std::clamp(index, 0, static_cast<int>(kAccents.size()) - 1))];
+}
+
+const Palette& palette() { return g_palette; }
+const Fonts& fonts() { return g_fonts; }
+bool animationsEnabled() { return g_animations; }
+
+ImVec4 withAlpha(ImVec4 c, float alpha) {
+    c.w = alpha;
+    return c;
+}
+
+ImVec4 lerp(const ImVec4& a, const ImVec4& b, float t) {
+    return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t};
+}
+
+ImVec4 rarityColor(core::Rarity rarity) {
+    switch (rarity) {
+        case core::Rarity::Common: return {0.70f, 0.72f, 0.78f, 1.0f};
+        case core::Rarity::Uncommon: return {0.30f, 0.82f, 0.45f, 1.0f};
+        case core::Rarity::Rare: return {0.29f, 0.60f, 1.00f, 1.0f};
+        case core::Rarity::Epic: return {0.70f, 0.42f, 1.00f, 1.0f};
+        case core::Rarity::Legendary: return {1.00f, 0.66f, 0.18f, 1.0f};
+        default: return g_palette.text;
+    }
+}
+
+void loadFonts(ImGuiIO& io) {
+    const ImWchar* ranges = io.Fonts->GetGlyphRangesCyrillic();  // Latin + Cyrillic
+
+    for (const FontPair& pair : kFontCandidates) {
+        if (!exists(pair.regular)) continue;
+        const char* bold = exists(pair.bold) ? pair.bold.data() : pair.regular.data();
+
+        g_fonts.body = io.Fonts->AddFontFromFileTTF(pair.regular.data(), 16.0f, nullptr, ranges);
+        g_fonts.strong = io.Fonts->AddFontFromFileTTF(bold, 16.0f, nullptr, ranges);
+        g_fonts.heading = io.Fonts->AddFontFromFileTTF(bold, 24.0f, nullptr, ranges);
+        g_fonts.small = io.Fonts->AddFontFromFileTTF(pair.regular.data(), 13.0f, nullptr, ranges);
+        if (g_fonts.body && g_fonts.strong && g_fonts.heading && g_fonts.small) {
+            io.FontDefault = g_fonts.body;
+            return;
+        }
+        io.Fonts->Clear();
+    }
+
+    // Fallback: the built-in ProggyClean bitmap font at a few sizes.
+    auto makeDefault = [&io](float size) {
+        ImFontConfig cfg;
+        cfg.SizePixels = size;
+        return io.Fonts->AddFontDefault(&cfg);
+    };
+    g_fonts.body = makeDefault(13.0f);
+    g_fonts.strong = g_fonts.body;
+    g_fonts.heading = makeDefault(26.0f);
+    g_fonts.small = g_fonts.body;
+    io.FontDefault = g_fonts.body;
+}
+
+void apply(const core::AppearanceSettings& appearance) {
+    g_animations = appearance.animations;
+
+    Palette& p = g_palette;
+    p.accent = accentPreset(appearance.accent);
+    p.accentHover = lerp(p.accent, ImVec4{1, 1, 1, 1}, 0.12f);
+    p.accentActive = lerp(p.accent, ImVec4{0, 0, 0, 1}, 0.15f);
+    p.accentSoft = withAlpha(p.accent, 0.16f);
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    style = ImGuiStyle{};  // start from a clean slate so ScaleAllSizes() doesn't accumulate
+
+    // ---- Geometry -----------------------------------------------------------
+    const float r = appearance.rounding;
+    style.WindowPadding = {18.0f, 16.0f};
+    style.FramePadding = {10.0f, 6.0f};
+    style.CellPadding = {8.0f, 6.0f};
+    style.ItemSpacing = {10.0f, 9.0f};
+    style.ItemInnerSpacing = {8.0f, 6.0f};
+    style.IndentSpacing = 18.0f;
+    style.ScrollbarSize = 10.0f;
+    style.GrabMinSize = 12.0f;
+
+    style.WindowRounding = r + 4.0f;
+    style.ChildRounding = r + 2.0f;
+    style.FrameRounding = r;
+    style.PopupRounding = r;
+    style.ScrollbarRounding = 12.0f;
+    style.GrabRounding = r;
+    style.TabRounding = r;
+
+    style.WindowBorderSize = 0.0f;
+    style.ChildBorderSize = 1.0f;
+    style.PopupBorderSize = 1.0f;
+    style.FrameBorderSize = 0.0f;
+    style.TabBorderSize = 0.0f;
+
+    style.WindowTitleAlign = {0.5f, 0.5f};
+    style.ButtonTextAlign = {0.5f, 0.5f};
+    style.SelectableTextAlign = {0.0f, 0.5f};
+    style.SeparatorTextBorderSize = 1.0f;
+    style.AntiAliasedLines = true;
+    style.AntiAliasedFill = true;
+
+    // ---- Colours ------------------------------------------------------------
+    ImVec4* c = style.Colors;
+    c[ImGuiCol_Text] = p.text;
+    c[ImGuiCol_TextDisabled] = p.textDisabled;
+    c[ImGuiCol_WindowBg] = p.background;
+    c[ImGuiCol_ChildBg] = p.surface;
+    c[ImGuiCol_PopupBg] = lerp(p.surface, p.surfaceHi, 0.5f);
+    c[ImGuiCol_Border] = p.border;
+    c[ImGuiCol_BorderShadow] = {0, 0, 0, 0};
+
+    c[ImGuiCol_FrameBg] = p.surfaceHi;
+    c[ImGuiCol_FrameBgHovered] = p.surfaceTop;
+    c[ImGuiCol_FrameBgActive] = lerp(p.surfaceTop, p.accent, 0.15f);
+
+    c[ImGuiCol_TitleBg] = p.sidebar;
+    c[ImGuiCol_TitleBgActive] = p.sidebar;
+    c[ImGuiCol_TitleBgCollapsed] = p.sidebar;
+    c[ImGuiCol_MenuBarBg] = p.sidebar;
+
+    c[ImGuiCol_ScrollbarBg] = {0, 0, 0, 0};
+    c[ImGuiCol_ScrollbarGrab] = p.surfaceTop;
+    c[ImGuiCol_ScrollbarGrabHovered] = lerp(p.surfaceTop, p.text, 0.15f);
+    c[ImGuiCol_ScrollbarGrabActive] = p.accent;
+
+    c[ImGuiCol_CheckMark] = {1, 1, 1, 1};
+    c[ImGuiCol_SliderGrab] = p.accent;
+    c[ImGuiCol_SliderGrabActive] = p.accentHover;
+
+    c[ImGuiCol_Button] = p.surfaceHi;
+    c[ImGuiCol_ButtonHovered] = p.surfaceTop;
+    c[ImGuiCol_ButtonActive] = p.accentActive;
+
+    c[ImGuiCol_Header] = p.accentSoft;
+    c[ImGuiCol_HeaderHovered] = withAlpha(p.accent, 0.22f);
+    c[ImGuiCol_HeaderActive] = withAlpha(p.accent, 0.30f);
+
+    c[ImGuiCol_Separator] = p.border;
+    c[ImGuiCol_SeparatorHovered] = p.accent;
+    c[ImGuiCol_SeparatorActive] = p.accent;
+
+    c[ImGuiCol_ResizeGrip] = {0, 0, 0, 0};
+    c[ImGuiCol_ResizeGripHovered] = p.accentSoft;
+    c[ImGuiCol_ResizeGripActive] = p.accent;
+
+    c[ImGuiCol_Tab] = p.surface;
+    c[ImGuiCol_TabHovered] = p.surfaceTop;
+    c[ImGuiCol_TabSelected] = p.accentSoft;
+    c[ImGuiCol_TabSelectedOverline] = p.accent;
+    c[ImGuiCol_TabDimmed] = p.surface;
+    c[ImGuiCol_TabDimmedSelected] = p.surfaceHi;
+
+    c[ImGuiCol_PlotLines] = p.accent;
+    c[ImGuiCol_PlotLinesHovered] = p.accentHover;
+    c[ImGuiCol_PlotHistogram] = p.accent;
+    c[ImGuiCol_PlotHistogramHovered] = p.accentHover;
+
+    c[ImGuiCol_TableHeaderBg] = p.surfaceHi;
+    c[ImGuiCol_TableBorderStrong] = p.border;
+    c[ImGuiCol_TableBorderLight] = p.border;
+    c[ImGuiCol_TableRowBg] = {0, 0, 0, 0};
+    c[ImGuiCol_TableRowBgAlt] = {1, 1, 1, 0.02f};
+
+    c[ImGuiCol_TextLink] = p.accentHover;
+    c[ImGuiCol_TextSelectedBg] = withAlpha(p.accent, 0.35f);
+    c[ImGuiCol_DragDropTarget] = p.accent;
+    c[ImGuiCol_NavCursor] = p.accent;
+    c[ImGuiCol_NavWindowingHighlight] = p.accent;
+    c[ImGuiCol_NavWindowingDimBg] = {0, 0, 0, 0.5f};
+    c[ImGuiCol_ModalWindowDimBg] = {0, 0, 0, 0.55f};
+
+    // ---- Scale --------------------------------------------------------------
+    style.ScaleAllSizes(appearance.uiScale);
+    ImGui::GetIO().FontGlobalScale = appearance.uiScale;
+}
+
+}  // namespace ui::theme
+######## END FILE ########
+
+// [12/25]
+######## FILE: src/ui/Icons.h ########
+#pragma once
+
+// Vector icons drawn with ImDrawList. No icon font or texture is required,
+// and they stay crisp at any UI scale.
+
+#include <imgui.h>
+
+#include <cstdint>
+
+namespace ui {
+
+enum class Icon : std::uint8_t { Logo, Combat, Player, Inventory, Explorer, Settings };
+
+// Draws `icon` centred at `center`, fitting a `size` x `size` box.
+void drawIcon(ImDrawList* dl, Icon icon, ImVec2 center, float size, ImU32 color);
+
+}  // namespace ui
+######## END FILE ########
+
+// [13/25]
+######## FILE: src/ui/Icons.cpp ########
+#include "ui/Icons.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <numbers>
+
+namespace ui {
+
+namespace {
+
+constexpr float kPi = std::numbers::pi_v<float>;
+
+ImVec2 operator+(ImVec2 a, ImVec2 b) { return {a.x + b.x, a.y + b.y}; }
+
+ImVec2 polar(ImVec2 c, float radius, float angle) {
+    return {c.x + std::cos(angle) * radius, c.y + std::sin(angle) * radius};
+}
+
+void drawLogo(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
+    // Faceted diamond.
+    const float r = s * 0.5f;
+    const ImVec2 top = c + ImVec2{0, -r}, right = c + ImVec2{r * 0.8f, 0};
+    const ImVec2 bottom = c + ImVec2{0, r}, left = c + ImVec2{-r * 0.8f, 0};
+    dl->AddQuadFilled(top, right, bottom, left, col);
+    const ImU32 facet = IM_COL32(255, 255, 255, 70);
+    dl->AddTriangleFilled(top, right, c, facet);
+    dl->AddTriangleFilled(left, c, bottom, IM_COL32(0, 0, 0, 50));
+}
+
+void drawCrosshair(ImDrawList* dl, ImVec2 c, float s, ImU32 col, float t) {
+    const float r = s * 0.36f;
+    dl->AddCircle(c, r, col, 32, t);
+    const float in = r * 0.45f, out = s * 0.5f;
+    for (int i = 0; i < 4; ++i) {
+        const float a = static_cast<float>(i) * kPi * 0.5f;
+        dl->AddLine(polar(c, in, a), polar(c, out, a), col, t);
+    }
+    dl->AddCircleFilled(c, t * 1.1f, col);
+}
+
+void drawPlayer(ImDrawList* dl, ImVec2 c, float s, ImU32 col, float t) {
+    dl->AddCircle(c + ImVec2{0, -s * 0.18f}, s * 0.2f, col, 24, t);
+    // Shoulders: upper half of an ellipse-ish arc.
+    dl->PathArcTo(c + ImVec2{0, s * 0.48f}, s * 0.36f, kPi * 1.08f, kPi * 1.92f, 24);
+    dl->PathStroke(col, ImDrawFlags_None, t);
+}
+
+void drawInventory(ImDrawList* dl, ImVec2 c, float s, ImU32 col, float t) {
+    // Backpack: body, flap and handle.
+    const ImVec2 min = c + ImVec2{-s * 0.34f, -s * 0.22f};
+    const ImVec2 max = c + ImVec2{s * 0.34f, s * 0.42f};
+    dl->AddRect(min, max, col, s * 0.12f, ImDrawFlags_None, t);
+    dl->AddLine({min.x, c.y + s * 0.06f}, {max.x, c.y + s * 0.06f}, col, t);
+    dl->AddRectFilled(c + ImVec2{-s * 0.07f, s * 0.02f}, c + ImVec2{s * 0.07f, s * 0.14f}, col, 1.0f);
+    dl->PathArcTo(c + ImVec2{0, -s * 0.22f}, s * 0.15f, kPi, kPi * 2.0f, 12);
+    dl->PathStroke(col, ImDrawFlags_None, t);
+}
+
+void drawCompass(ImDrawList* dl, ImVec2 c, float s, ImU32 col, float t) {
+    const float r = s * 0.44f;
+    dl->AddCircle(c, r, col, 32, t);
+    const float a = -kPi * 0.25f;  // needle points north-east
+    const ImVec2 tip = polar(c, r * 0.7f, a), tail = polar(c, r * 0.7f, a + kPi);
+    const ImVec2 l = polar(c, r * 0.22f, a - kPi * 0.5f), rr = polar(c, r * 0.22f, a + kPi * 0.5f);
+    dl->AddTriangleFilled(tip, rr, l, col);
+    dl->AddTriangle(tail, l, rr, col, t * 0.8f);
+}
+
+void drawGear(ImDrawList* dl, ImVec2 c, float s, ImU32 col, float t) {
+    constexpr int kTeeth = 8;
+    const float outer = s * 0.46f, inner = s * 0.34f;
+    const float step = 2.0f * kPi / kTeeth;
+
+    std::array<ImVec2, kTeeth * 4> pts{};
+    for (int i = 0; i < kTeeth; ++i) {
+        const float a = static_cast<float>(i) * step;
+        pts[i * 4 + 0] = polar(c, inner, a - step * 0.30f);
+        pts[i * 4 + 1] = polar(c, outer, a - step * 0.18f);
+        pts[i * 4 + 2] = polar(c, outer, a + step * 0.18f);
+        pts[i * 4 + 3] = polar(c, inner, a + step * 0.30f);
+    }
+    dl->AddPolyline(pts.data(), static_cast<int>(pts.size()), col, ImDrawFlags_Closed, t);
+    dl->AddCircle(c, s * 0.14f, col, 20, t);
+}
+
+}  // namespace
+
+void drawIcon(ImDrawList* dl, Icon icon, ImVec2 center, float size, ImU32 color) {
+    const float thickness = std::max(1.5f, size * 0.085f);
+    switch (icon) {
+        case Icon::Logo: drawLogo(dl, center, size, color); break;
+        case Icon::Combat: drawCrosshair(dl, center, size, color, thickness); break;
+        case Icon::Player: drawPlayer(dl, center, size, color, thickness); break;
+        case Icon::Inventory: drawInventory(dl, center, size, color, thickness); break;
+        case Icon::Explorer: drawCompass(dl, center, size, color, thickness); break;
+        case Icon::Settings: drawGear(dl, center, size, color, thickness); break;
+    }
+}
+
+}  // namespace ui
+######## END FILE ########
+
+// [14/25]
+######## FILE: src/ui/Widgets.h ########
+#pragma once
+
+// Reusable, stateless-from-the-caller's-view widgets built on top of ImGui.
+// They only render and report interaction; they know nothing about the domain.
+
+#include "ui/Icons.h"
+
+#include <imgui.h>
+
+#include <span>
+
+namespace ui::widgets {
+
+// Smoothly moves a per-widget value towards `target` (frame-rate independent).
+float animate(ImGuiID id, float target, float speed = 14.0f);
+
+// ---- Navigation -------------------------------------------------------------
+
+// Square icon button for the sidebar with an animated selection indicator.
+bool sidebarButton(const char* id, Icon icon, bool selected, const char* tooltip, float sidebarLeftX);
+
+// Horizontal "pill" tab bar. Returns true when the selection changed.
+bool pillTabs(const char* id, std::span<const char* const> labels, int& current);
+
+// ---- Layout -----------------------------------------------------------------
+
+// Rounded panel with a title. RAII: the panel is closed when the object goes out of scope.
+class Card {
+public:
+    explicit Card(const char* title, const char* subtitle = nullptr);
+    ~Card();
+    Card(const Card&) = delete;
+    Card& operator=(const Card&) = delete;
+};
+
+// Responsive grid of cards: two columns on wide windows, one on narrow ones.
+class CardGrid {
+public:
+    explicit CardGrid(const char* id, float minColumnWidth = 340.0f);
+    ~CardGrid();
+    CardGrid(const CardGrid&) = delete;
+    CardGrid& operator=(const CardGrid&) = delete;
+
+    void next();  // move to the next cell
+
+private:
+    bool m_open = false;
+};
+
+// ---- Inputs (label on the left, control on the right) ------------------------
+
+bool toggle(const char* label, bool* value, const char* hint = nullptr);
+bool checkbox(const char* label, bool* value, const char* hint = nullptr);
+bool sliderFloat(const char* label, float* value, float min, float max, const char* format = "%.2f");
+bool sliderInt(const char* label, int* value, int min, int max, const char* format = "%d");
+bool combo(const char* label, int* current, std::span<const char* const> items);
+
+// ---- Buttons & display --------------------------------------------------------
+
+enum class ButtonKind { Primary, Secondary, Danger };
+bool button(const char* label, ButtonKind kind = ButtonKind::Secondary, ImVec2 size = {0, 0});
+
+// Labelled horizontal progress bar ("Health  74 / 100").
+void statBar(const char* label, float value, float max, ImVec4 color);
+
+// Small rounded badge with coloured text.
+void badge(const char* text, ImVec4 color);
+
+// Muted caption text.
+void caption(const char* text);
+
+// "(?)" marker with a tooltip.
+void helpMarker(const char* text);
+
+// Row of clickable colour dots. Returns true when the selection changed.
+bool colorSwatches(const char* id, std::span<const ImVec4> colors, int& current);
+
+}  // namespace ui::widgets
+######## END FILE ########
+
+// [15/25]
+######## FILE: src/ui/Widgets.cpp ########
+#define IMGUI_DEFINE_MATH_OPERATORS
+#include "ui/Widgets.h"
+
+#include "ui/Theme.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+
+namespace ui::widgets {
+
+namespace {
+
+ImU32 u32(const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); }
+
+float scale() { return ImGui::GetIO().FontGlobalScale; }
+
+// Starts a "label | control" row and sets the width for the control that follows.
+void beginRow(const char* label) {
+    const float x0 = ImGui::GetCursorScreenPos().x;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float labelWidth = std::floor(avail * 0.42f);
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine();
+    ImGui::SetCursorScreenPos({x0 + labelWidth, ImGui::GetCursorScreenPos().y});
+    ImGui::SetNextItemWidth(avail - labelWidth);
+}
+
+void hintUnderneath(const char* hint, float indent) {
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y * 0.6f);
+    if (indent > 0) ImGui::Indent(indent);
+    caption(hint);
+    if (indent > 0) ImGui::Unindent(indent);
+}
+
+}  // namespace
+
+float animate(ImGuiID id, float target, float speed) {
+    float* value = ImGui::GetStateStorage()->GetFloatRef(id, target);
+    if (!theme::animationsEnabled()) return *value = target;
+
+    const float k = 1.0f - std::exp(-speed * ImGui::GetIO().DeltaTime);
+    *value += (target - *value) * k;
+    if (std::abs(target - *value) < 1e-3f) *value = target;
+    return *value;
+}
+
+// ---------------------------------------------------------- Navigation ----
+
+bool sidebarButton(const char* id, Icon icon, bool selected, const char* tooltip, float sidebarLeftX) {
+    const auto& pal = theme::palette();
+    const float size = 46.0f * scale();
+
+    ImGui::PushID(id);
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton("##btn", {size, size});
+    const bool hovered = ImGui::IsItemHovered();
+
+    const float sel = animate(ImGui::GetID("sel"), selected ? 1.0f : 0.0f);
+    const float hov = animate(ImGui::GetID("hov"), hovered ? 1.0f : 0.0f);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 max = pos + ImVec2{size, size};
+    const float rounding = ImGui::GetStyle().FrameRounding + 4.0f * scale();
+
+    if (hov > 0.01f) dl->AddRectFilled(pos, max, u32(theme::withAlpha(pal.surfaceTop, 0.6f * hov)), rounding);
+    if (sel > 0.01f) dl->AddRectFilled(pos, max, u32(theme::withAlpha(pal.accent, 0.18f * sel)), rounding);
+
+    // Active indicator glued to the left edge of the sidebar.
+    if (sel > 0.01f) {
+        const float h = size * 0.5f * sel;
+        const float cy = pos.y + size * 0.5f;
+        dl->AddRectFilled({sidebarLeftX, cy - h * 0.5f}, {sidebarLeftX + 3.0f * scale(), cy + h * 0.5f},
+                          u32(pal.accent), 2.0f, ImDrawFlags_RoundCornersRight);
+    }
+
+    const ImVec4 iconColor = theme::lerp(theme::lerp(pal.textMuted, pal.text, hov), pal.accent, sel);
+    drawIcon(dl, icon, pos + ImVec2{size, size} * 0.5f, size * 0.44f, u32(iconColor));
+
+    if (tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", tooltip);
+    ImGui::PopID();
+    return clicked;
+}
+
+bool pillTabs(const char* id, std::span<const char* const> labels, int& current) {
+    if (labels.empty()) return false;
+    const auto& pal = theme::palette();
+    const float s = scale();
+    const ImVec2 pad{16.0f * s, 7.0f * s};
+    const float inset = 4.0f * s;
+    const float pillH = ImGui::GetTextLineHeight() + pad.y * 2.0f;
+
+    ImGui::PushID(id);
+    current = std::clamp(current, 0, static_cast<int>(labels.size()) - 1);
+
+    // Measure.
+    float totalW = inset;
+    float targetX = 0, targetW = 0;
+    for (int i = 0; i < static_cast<int>(labels.size()); ++i) {
+        const float w = ImGui::CalcTextSize(labels[i]).x + pad.x * 2.0f;
+        if (i == current) targetX = totalW, targetW = w;
+        totalW += w;
+    }
+    totalW += inset;
+
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 size{totalW, pillH + inset * 2.0f};
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(origin, origin + size, u32(pal.surface), size.y * 0.5f);
+    dl->AddRect(origin, origin + size, u32(pal.border), size.y * 0.5f);
+
+    // Sliding highlight.
+    const float hx = animate(ImGui::GetID("x"), targetX, 18.0f);
+    const float hw = animate(ImGui::GetID("w"), targetW, 18.0f);
+    const ImVec2 hMin = origin + ImVec2{hx, inset};
+    dl->AddRectFilled(hMin, hMin + ImVec2{hw, pillH}, u32(pal.accent), pillH * 0.5f);
+
+    bool changed = false;
+    float x = inset;
+    for (int i = 0; i < static_cast<int>(labels.size()); ++i) {
+        const ImVec2 textSize = ImGui::CalcTextSize(labels[i]);
+        const float w = textSize.x + pad.x * 2.0f;
+        const ImVec2 pMin = origin + ImVec2{x, inset};
+
+        ImGui::SetCursorScreenPos(pMin);
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("##pill", {w, pillH}) && current != i) {
+            current = i;
+            changed = true;
+        }
+        const bool hovered = ImGui::IsItemHovered();
+        ImGui::PopID();
+
+        const ImVec4 col = i == current ? ImVec4{1, 1, 1, 1} : hovered ? pal.text : pal.textMuted;
+        dl->AddText(pMin + ImVec2{pad.x, pad.y}, u32(col), labels[i]);
+        x += w;
+    }
+
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::Dummy(size);
+    ImGui::PopID();
+    return changed;
+}
+
+// --------------------------------------------------------------- Layout ----
+
+Card::Card(const char* title, const char* subtitle) {
+    ImGui::BeginChild(title, {0, 0},
+                      ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PushFont(theme::fonts().strong);
+    ImGui::TextUnformatted(title);
+    ImGui::PopFont();
+    if (subtitle) hintUnderneath(subtitle, 0.0f);
+    ImGui::Dummy({0, 2.0f * scale()});
+}
+
+Card::~Card() {
+    ImGui::EndChild();
+    ImGui::Dummy({0, 2.0f * scale()});
+}
+
+CardGrid::CardGrid(const char* id, float minColumnWidth) {
+    const int columns = ImGui::GetContentRegionAvail().x >= minColumnWidth * 2.0f * scale() ? 2 : 1;
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, {7.0f * scale(), 0.0f});
+    m_open = ImGui::BeginTable(id, columns, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoPadOuterX);
+    ImGui::PopStyleVar();
+    if (m_open) ImGui::TableNextColumn();
+}
+
+CardGrid::~CardGrid() {
+    if (m_open) ImGui::EndTable();
+}
+
+void CardGrid::next() {
+    if (m_open) ImGui::TableNextColumn();
+}
+
+// --------------------------------------------------------------- Inputs ----
+
+bool toggle(const char* label, bool* value, const char* hint) {
+    const auto& pal = theme::palette();
+    const ImGuiStyle& style = ImGui::GetStyle();
+
+    ImGui::PushID(label);
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float frameH = ImGui::GetFrameHeight();
+    const float lineH = ImGui::GetTextLineHeight();
+
+    float hintH = 0.0f;
+    if (hint) {
+        ImGui::PushFont(theme::fonts().small);
+        hintH = ImGui::GetTextLineHeight() + 2.0f * scale();
+        ImGui::PopFont();
+    }
+    const float rowH = std::max(frameH, lineH + hintH);
+
+    const bool clicked = ImGui::InvisibleButton("##toggle", {width, rowH});
+    if (clicked) *value = !*value;
+    const bool hovered = ImGui::IsItemHovered();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float textY = pos.y + (rowH - lineH - hintH) * 0.5f;
+    dl->AddText({pos.x, textY}, u32(pal.text), label);
+    if (hint) {
+        ImGui::PushFont(theme::fonts().small);
+        dl->AddText({pos.x, textY + lineH + 2.0f * scale()}, u32(pal.textMuted), hint);
+        ImGui::PopFont();
+    }
+
+    // Switch.
+    const float h = frameH * 0.78f;
+    const float w = h * 1.8f;
+    const ImVec2 sMin{pos.x + width - w - style.FramePadding.x * 0.25f, pos.y + (rowH - h) * 0.5f};
+    const float t = animate(ImGui::GetID("knob"), *value ? 1.0f : 0.0f, 16.0f);
+
+    ImVec4 track = theme::lerp(pal.surfaceTop, pal.accent, t);
+    if (hovered) track = theme::lerp(track, ImVec4{1, 1, 1, 1}, 0.08f);
+    dl->AddRectFilled(sMin, sMin + ImVec2{w, h}, u32(track), h * 0.5f);
+
+    const float r = h * 0.5f - 3.0f * scale();
+    const ImVec2 knob{sMin.x + h * 0.5f + (w - h) * t, sMin.y + h * 0.5f};
+    dl->AddCircleFilled(knob + ImVec2{0, 1}, r, IM_COL32(0, 0, 0, 60));
+    dl->AddCircleFilled(knob, r, IM_COL32(255, 255, 255, 255));
+
+    ImGui::PopID();
+    return clicked;
+}
+
+bool checkbox(const char* label, bool* value, const char* hint) {
+    const auto& pal = theme::palette();
+    const bool on = *value;
+    if (on) {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, pal.accent);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, pal.accentHover);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, pal.accentActive);
+    }
+    const bool changed = ImGui::Checkbox(label, value);
+    if (on) ImGui::PopStyleColor(3);
+
+    if (hint) hintUnderneath(hint, ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+    return changed;
+}
+
+bool sliderFloat(const char* label, float* value, float min, float max, const char* format) {
+    ImGui::PushID(label);
+    beginRow(label);
+    const bool changed = ImGui::SliderFloat("##v", value, min, max, format, ImGuiSliderFlags_AlwaysClamp);
+    ImGui::PopID();
+    return changed;
+}
+
+bool sliderInt(const char* label, int* value, int min, int max, const char* format) {
+    ImGui::PushID(label);
+    beginRow(label);
+    const bool changed = ImGui::SliderInt("##v", value, min, max, format, ImGuiSliderFlags_AlwaysClamp);
+    ImGui::PopID();
+    return changed;
+}
+
+bool combo(const char* label, int* current, std::span<const char* const> items) {
+    ImGui::PushID(label);
+    beginRow(label);
+    const bool changed = ImGui::Combo("##v", current, items.data(), static_cast<int>(items.size()));
+    ImGui::PopID();
+    return changed;
+}
+
+// ------------------------------------------------------ Buttons & display ----
+
+bool button(const char* label, ButtonKind kind, ImVec2 size) {
+    const auto& pal = theme::palette();
+    int colors = 0;
+    switch (kind) {
+        case ButtonKind::Primary:
+            ImGui::PushStyleColor(ImGuiCol_Button, pal.accent);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, pal.accentHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, pal.accentActive);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{1, 1, 1, 1});
+            colors = 4;
+            break;
+        case ButtonKind::Danger:
+            ImGui::PushStyleColor(ImGuiCol_Button, theme::withAlpha(pal.danger, 0.14f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme::withAlpha(pal.danger, 0.24f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme::withAlpha(pal.danger, 0.34f));
+            ImGui::PushStyleColor(ImGuiCol_Text, pal.danger);
+            colors = 4;
+            break;
+        case ButtonKind::Secondary: break;
+    }
+    const bool pressed = ImGui::Button(label, size);
+    ImGui::PopStyleColor(colors);
+    return pressed;
+}
+
+void statBar(const char* label, float value, float max, ImVec4 color) {
+    const auto& pal = theme::palette();
+    const float s = scale();
+    const float width = ImGui::GetContentRegionAvail().x;
+
+    char valueText[32];
+    std::snprintf(valueText, sizeof valueText, "%.0f / %.0f", value, max);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, pal.textMuted);
+    ImGui::TextUnformatted(label);
+    ImGui::PopStyleColor();
+    ImGui::SameLine(0, 0);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + width - ImGui::CalcTextSize(label).x - ImGui::CalcTextSize(valueText).x);
+    ImGui::TextUnformatted(valueText);
+
+    const float fraction = max > 0 ? std::clamp(value / max, 0.0f, 1.0f) : 0.0f;
+    const float shown = animate(ImGui::GetID(label), fraction, 10.0f);
+
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const float h = 8.0f * s;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(pos, pos + ImVec2{width, h}, u32(pal.surfaceHi), h * 0.5f);
+    if (shown > 0.0f) dl->AddRectFilled(pos, pos + ImVec2{std::max(h, width * shown), h}, u32(color), h * 0.5f);
+    ImGui::Dummy({width, h});
+}
+
+void badge(const char* text, ImVec4 color) {
+    const float s = scale();
+    ImGui::PushFont(theme::fonts().small);
+    const ImVec2 pad{7.0f * s, 2.0f * s};
+    const ImVec2 textSize = ImGui::CalcTextSize(text);
+    const ImVec2 size = textSize + pad * 2.0f;
+
+    // Vertically centre on a frame-height line (tables, rows with buttons).
+    const float offsetY = std::max(0.0f, (ImGui::GetFrameHeight() - size.y) * 0.5f);
+    const ImVec2 pos = ImGui::GetCursorScreenPos() + ImVec2{0, offsetY};
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(pos, pos + size, u32(theme::withAlpha(color, 0.15f)), size.y * 0.5f);
+    dl->AddText(pos + pad, u32(color), text);
+    ImGui::Dummy({size.x, size.y + offsetY});
+    ImGui::PopFont();
+}
+
+void caption(const char* text) {
+    ImGui::PushFont(theme::fonts().small);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::palette().textMuted);
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+}
+
+void helpMarker(const char* text) {
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+        ImGui::TextUnformatted(text);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
+bool colorSwatches(const char* id, std::span<const ImVec4> colors, int& current) {
+    const float s = scale();
+    const float r = 11.0f * s;
+    bool changed = false;
+
+    ImGui::PushID(id);
+    for (int i = 0; i < static_cast<int>(colors.size()); ++i) {
+        if (i > 0) ImGui::SameLine(0, 10.0f * s);
+        ImGui::PushID(i);
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        if (ImGui::InvisibleButton("##swatch", {r * 2 + 6 * s, r * 2 + 6 * s}) && current != i) {
+            current = i;
+            changed = true;
+        }
+        const bool hovered = ImGui::IsItemHovered();
+        const float sel = animate(ImGui::GetID("sel"), current == i ? 1.0f : 0.0f);
+        ImGui::PopID();
+
+        const ImVec2 c = pos + ImVec2{r + 3 * s, r + 3 * s};
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddCircleFilled(c, r * (hovered ? 1.0f : 0.9f), u32(colors[static_cast<std::size_t>(i)]), 32);
+        if (sel > 0.01f) {
+            dl->AddCircle(c, r + 2.0f * s, IM_COL32(255, 255, 255, static_cast<int>(220 * sel)), 32, 2.0f * s);
+            dl->AddCircleFilled(c, r * 0.32f * sel, IM_COL32(255, 255, 255, 255), 16);
+        }
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+}  // namespace ui::widgets
+######## END FILE ########
+
+// [16/25]
+######## FILE: src/ui/MainWindow.h ########
+#pragma once
+
+// Top-level layout: sidebar navigation, page header with pill tabs, scrollable
+// content area and status bar. Owns the pages and the navigation state.
+
+#include "core/Actions.h"
+#include "core/AppState.h"
+#include "ui/pages/Page.h"
+
+#include <array>
+#include <memory>
+
+namespace ui {
+
+enum class PageId : int { Combat, Player, Inventory, Explorer, Settings, Count };
+
+class MainWindow {
+public:
+    MainWindow();
+
+    void draw(const core::AppState& state, core::ActionSink& actions);
+
+    void setActivePage(PageId page);
+    void setActiveSection(int section);
+    [[nodiscard]] PageId activePage() const { return m_active; }
+
+private:
+    static constexpr std::size_t kPageCount = static_cast<std::size_t>(PageId::Count);
+
+    void drawSidebar();
+    void drawHeader(const core::AppState& state);
+    void drawStatusBar(const core::AppState& state);
+    void drawFpsOverlay();
+
+    [[nodiscard]] Page& activePageRef() { return *m_pages[static_cast<std::size_t>(m_active)]; }
+    [[nodiscard]] int& activeSection() { return m_sections[static_cast<std::size_t>(m_active)]; }
+
+    std::array<std::unique_ptr<Page>, kPageCount> m_pages;
+    std::array<int, kPageCount> m_sections{};  // selected pill tab per page
+    PageId m_active = PageId::Combat;
+    float m_fade = 1.0f;  // content fade-in after navigation
+};
+
+}  // namespace ui
+######## END FILE ########
+
+// [17/25]
+######## FILE: src/ui/MainWindow.cpp ########
+#define IMGUI_DEFINE_MATH_OPERATORS
+#include "ui/MainWindow.h"
+
+#include "ui/Theme.h"
+#include "ui/Widgets.h"
+
+#include <algorithm>
+#include <cstdio>
+
+namespace ui {
+
+namespace {
+
+float scale() { return ImGui::GetIO().FontGlobalScale; }
+
+ImU32 u32(const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); }
+
+}  // namespace
+
+MainWindow::MainWindow()
+    : m_pages{
+          std::make_unique<CombatPage>(),
+          std::make_unique<PlayerPage>(),
+          std::make_unique<InventoryPage>(),
+          std::make_unique<ExplorerPage>(),
+          std::make_unique<SettingsPage>(),
+      } {}
+
+void MainWindow::setActivePage(PageId page) {
+    if (page == m_active || page == PageId::Count) return;
+    m_active = page;
+    m_fade = 0.0f;
+}
+
+void MainWindow::setActiveSection(int section) {
+    activeSection() = std::clamp(section, 0, static_cast<int>(activePageRef().sections().size()) - 1);
+}
+
+void MainWindow::draw(const core::AppState& state, core::ActionSink& actions) {
+    const auto& pal = theme::palette();
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(viewport->WorkSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    constexpr ImGuiWindowFlags kRootFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::Begin("##root", nullptr, kRootFlags);
+    ImGui::PopStyleVar(2);
+
+    drawSidebar();
+    ImGui::SameLine(0, 0);
+
+    // ---- Main column ----
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, pal.background);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{28.0f, 22.0f} * scale());
+    ImGui::BeginChild("##main", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    drawHeader(state);
+
+    const float statusH = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y;
+    m_fade = theme::animationsEnabled() ? std::min(1.0f, m_fade + ImGui::GetIO().DeltaTime * 5.0f) : 1.0f;
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0, 0, 0, 0});
+    ImGui::BeginChild("##content", {0, -statusH}, ImGuiChildFlags_None);
+    ImGui::PopStyleColor();
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, m_fade);
+    ImGui::PushID(static_cast<int>(m_active));
+    activePageRef().draw(activeSection(), state, actions);
+    ImGui::PopID();
+    ImGui::PopStyleVar();
+    ImGui::EndChild();
+
+    drawStatusBar(state);
+    ImGui::EndChild();
+    ImGui::End();
+
+    if (state.settings.general.showFpsOverlay) drawFpsOverlay();
+}
+
+void MainWindow::drawSidebar() {
+    const auto& pal = theme::palette();
+    const float s = scale();
+    const float width = 78.0f * s;
+    const float buttonSize = 46.0f * s;
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, pal.sidebar);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 18.0f * s});
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 8.0f * s});
+    ImGui::BeginChild("##sidebar", {width, 0}, ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 winPos = ImGui::GetWindowPos();
+    const ImVec2 winSize = ImGui::GetWindowSize();
+    dl->AddLine({winPos.x + winSize.x - 1, winPos.y}, {winPos.x + winSize.x - 1, winPos.y + winSize.y}, u32(pal.border));
+
+    // Logo.
+    const float logoSize = 30.0f * s;
+    const ImVec2 logoPos = ImGui::GetCursorScreenPos() + ImVec2{(width - logoSize) * 0.5f, 0};
+    drawIcon(dl, Icon::Logo, logoPos + ImVec2{logoSize, logoSize} * 0.5f, logoSize, u32(pal.accent));
+    ImGui::Dummy({width, logoSize + 18.0f * s});
+
+    auto navButton = [&](PageId id) {
+        Page& page = *m_pages[static_cast<std::size_t>(id)];
+        ImGui::SetCursorPosX((width - buttonSize) * 0.5f);
+        if (widgets::sidebarButton(page.title(), page.icon(), m_active == id, page.title(), winPos.x))
+            setActivePage(id);
+    };
+
+    for (PageId id : {PageId::Combat, PageId::Player, PageId::Inventory, PageId::Explorer}) navButton(id);
+
+    // Settings pinned to the bottom.
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), winSize.y - buttonSize - 18.0f * s));
+    navButton(PageId::Settings);
+
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+}
+
+void MainWindow::drawHeader(const core::AppState& state) {
+    const auto& pal = theme::palette();
+    Page& page = activePageRef();
+
+    const float top = ImGui::GetCursorPosY();
+    const float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+    ImGui::PushFont(theme::fonts().heading);
+    ImGui::TextUnformatted(page.title());
+    ImGui::PopFont();
+    ImGui::PushStyleColor(ImGuiCol_Text, pal.textMuted);
+    ImGui::TextUnformatted(page.subtitle());
+    ImGui::PopStyleColor();
+
+    // Player summary in the top-right corner.
+    char summary[64];
+    std::snprintf(summary, sizeof summary, "%s  |  Lv %d",
+                  core::kPlayerClasses[static_cast<std::size_t>(state.player.playerClass)], state.player.level);
+    ImGui::PushFont(theme::fonts().small);  // badge font
+    const float summaryW = ImGui::CalcTextSize(summary).x + 14.0f * scale();
+    ImGui::PopFont();
+    const ImVec2 restore = ImGui::GetCursorPos();
+    ImGui::SetCursorPos({right - summaryW, top + 6.0f * scale()});
+    widgets::badge(summary, pal.accent);
+    ImGui::SetCursorPos(restore);
+
+    ImGui::Dummy({0, 6.0f * scale()});
+    widgets::pillTabs("##sections", page.sections(), activeSection());
+    ImGui::Dummy({0, 6.0f * scale()});
+}
+
+void MainWindow::drawStatusBar(const core::AppState& state) {
+    const auto& pal = theme::palette();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float right = ImGui::GetCursorPosX() + width;
+    ImGui::GetWindowDrawList()->AddLine({p.x, p.y}, {p.x + width, p.y}, u32(pal.border));
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetStyle().ItemSpacing.y);
+
+    ImGui::AlignTextToFramePadding();
+    if (!state.log.empty()) {
+        const core::LogEntry& last = state.log.back();
+        const float age = static_cast<float>(state.clock - last.timestamp);
+        const float alpha = std::clamp(1.0f - (age - 4.0f) / 2.0f, 0.45f, 1.0f);  // dims after ~5 s
+        ImVec4 dot = pal.textMuted;
+        switch (last.level) {
+            case core::LogLevel::Success: dot = pal.success; break;
+            case core::LogLevel::Warning: dot = pal.warning; break;
+            case core::LogLevel::Error: dot = pal.danger; break;
+            default: break;
+        }
+        const float r = 3.5f * scale();
+        const ImVec2 c = ImGui::GetCursorScreenPos() + ImVec2{r, ImGui::GetFrameHeight() * 0.5f};
+        ImGui::GetWindowDrawList()->AddCircleFilled(c, r, u32(theme::withAlpha(dot, alpha)));
+        ImGui::Dummy({r * 2.0f, 0});
+        ImGui::SameLine();
+        ImGui::TextColored(theme::withAlpha(pal.text, alpha * 0.85f), "%s", last.message.c_str());
+    }
+
+    const auto& ex = state.explorer;
+    char info[96];
+    std::snprintf(info, sizeof info, "%s   %.0f FPS",
+                  ex.locations.empty() ? "-" : ex.locations[static_cast<std::size_t>(ex.currentLocation)].name.c_str(),
+                  ImGui::GetIO().Framerate);
+    ImGui::SameLine(0, 0);
+    ImGui::SetCursorPosX(right - ImGui::CalcTextSize(info).x);
+    ImGui::TextColored(pal.textMuted, "%s", info);
+}
+
+void MainWindow::drawFpsOverlay() {
+    const auto& pal = theme::palette();
+    const float s = scale();
+    char text[32];
+    std::snprintf(text, sizeof text, "%.0f FPS  %.2f ms", ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);
+
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const ImVec2 pad{10.0f * s, 6.0f * s};
+    const ImVec2 size = ImGui::CalcTextSize(text) + pad * 2.0f;
+    const ImVec2 pos{vp->WorkPos.x + vp->WorkSize.x - size.x - 12.0f * s, vp->WorkPos.y + 12.0f * s};
+
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(pos, pos + size, u32(theme::withAlpha(pal.sidebar, 0.92f)), size.y * 0.5f);
+    dl->AddRect(pos, pos + size, u32(pal.border), size.y * 0.5f);
+    dl->AddText(pos + pad, u32(pal.success), text);
+}
+
+}  // namespace ui
+######## END FILE ########
+
+// [18/25]
+######## FILE: src/ui/pages/Page.h ########
+#pragma once
+
+// A page is a pure view: it reads the state and reports user intent as actions.
+// It may keep purely visual state (search text, selection), but never domain data.
+
+#include "core/Actions.h"
+#include "core/AppState.h"
+#include "ui/Icons.h"
+
+#include <memory>
+#include <span>
+
+namespace ui {
+
+class Page {
+public:
+    virtual ~Page() = default;
+
+    [[nodiscard]] virtual const char* title() const = 0;
+    [[nodiscard]] virtual const char* subtitle() const = 0;
+    [[nodiscard]] virtual Icon icon() const = 0;
+    [[nodiscard]] virtual std::span<const char* const> sections() const = 0;  // pill tabs
+
+    virtual void draw(int section, const core::AppState& state, core::ActionSink& actions) = 0;
+};
+
+class CombatPage final : public Page {
+public:
+    const char* title() const override { return "Combat"; }
+    const char* subtitle() const override { return "Attack behaviour, targeting and hit feedback"; }
+    Icon icon() const override { return Icon::Combat; }
+    std::span<const char* const> sections() const override;
+    void draw(int section, const core::AppState& state, core::ActionSink& actions) override;
+};
+
+class PlayerPage final : public Page {
+public:
+    const char* title() const override { return "Player"; }
+    const char* subtitle() const override { return "Character stats, movement and camera"; }
+    Icon icon() const override { return Icon::Player; }
+    std::span<const char* const> sections() const override;
+    void draw(int section, const core::AppState& state, core::ActionSink& actions) override;
+};
+
+class InventoryPage final : public Page {
+public:
+    const char* title() const override { return "Inventory"; }
+    const char* subtitle() const override { return "Items, equipment and loot rules"; }
+    Icon icon() const override { return Icon::Inventory; }
+    std::span<const char* const> sections() const override;
+    void draw(int section, const core::AppState& state, core::ActionSink& actions) override;
+
+private:
+    void drawItems(const core::AppState& state, core::ActionSink& actions);
+    void drawLootRules(const core::AppState& state, core::ActionSink& actions);
+
+    // View-only state.
+    char m_search[64] = {};
+    int m_categoryFilter = 0;  // 0 = all, otherwise ItemCategory + 1
+    int m_pendingDropId = -1;
+};
+
+class ExplorerPage final : public Page {
+public:
+    const char* title() const override { return "Explorer"; }
+    const char* subtitle() const override { return "Locations, fast travel and world state"; }
+    Icon icon() const override { return Icon::Explorer; }
+    std::span<const char* const> sections() const override;
+    void draw(int section, const core::AppState& state, core::ActionSink& actions) override;
+
+private:
+    void drawLocations(const core::AppState& state, core::ActionSink& actions);
+    void drawWorld(const core::AppState& state, core::ActionSink& actions);
+
+    int m_selected = 0;
+    bool m_onlyDiscovered = false;
+};
+
+class SettingsPage final : public Page {
+public:
+    const char* title() const override { return "Settings"; }
+    const char* subtitle() const override { return "Appearance, application and activity log"; }
+    Icon icon() const override { return Icon::Settings; }
+    std::span<const char* const> sections() const override;
+    void draw(int section, const core::AppState& state, core::ActionSink& actions) override;
+
+private:
+    void drawAppearance(const core::AppState& state, core::ActionSink& actions);
+    void drawGeneral(const core::AppState& state, core::ActionSink& actions);
+    void drawAbout(const core::AppState& state, core::ActionSink& actions);
+
+    float m_scaleDraft = -1.0f;  // UI scale is applied on release, not while dragging
+    bool m_confirmReset = false;
+    bool m_previewCheck = true;
+    float m_previewSlider = 0.6f;
+};
+
+}  // namespace ui
+######## END FILE ########
+
+// [19/25]
+######## FILE: src/ui/pages/CombatPage.cpp ########
+#include "ui/pages/Page.h"
+
+#include "ui/Widgets.h"
+
+#include <array>
+
+namespace ui {
+
+namespace {
+constexpr std::array kSections{"General", "Targeting", "Feedback"};
+}
+
+std::span<const char* const> CombatPage::sections() const { return kSections; }
+
+void CombatPage::draw(int section, const core::AppState& state, core::ActionSink& actions) {
+    using namespace widgets;
+
+    // Edit a draft copy; the controller validates and commits it.
+    core::CombatSettings draft = state.combat;
+    bool changed = false;
+
+    CardGrid grid("##combat");
+    switch (section) {
+        case 0: {
+            {
+                Card card("Automation", "Let the character act on its own");
+                changed |= toggle("Auto attack", &draft.autoAttack, "Attack the current target continuously");
+                changed |= toggle("Auto block", &draft.autoBlock, "Raise the shield when an attack is incoming");
+            }
+            grid.next();
+            {
+                Card card("Tuning");
+                changed |= combo("Difficulty", &draft.difficulty, core::kDifficulties);
+                changed |= sliderFloat("Attack speed", &draft.attackSpeed, 0.25f, 3.0f, "%.2fx");
+                changed |= sliderInt("Combo length", &draft.comboLength, 1, 10, "%d hits");
+            }
+            break;
+        }
+        case 1: {
+            {
+                Card card("Target selection");
+                changed |= combo("Priority", &draft.targetPriority, core::kTargetPriorities);
+                changed |= sliderFloat("Lock range", &draft.lockRange, 5.0f, 100.0f, "%.0f m");
+            }
+            grid.next();
+            {
+                Card card("Filters");
+                changed |= checkbox("Lock on target", &draft.targetLock, "Camera follows the selected enemy");
+                changed |= checkbox("Ignore neutral NPCs", &draft.ignoreNeutral);
+            }
+            break;
+        }
+        default: {
+            {
+                Card card("Indicators");
+                changed |= checkbox("Damage numbers", &draft.damageNumbers);
+                ImGui::BeginDisabled(!draft.damageNumbers);
+                changed |= combo("Number style", &draft.damageNumberStyle, core::kDamageNumberStyles);
+                ImGui::EndDisabled();
+                changed |= checkbox("Hit markers", &draft.hitMarkers);
+            }
+            grid.next();
+            {
+                Card card("Impact", "How strongly hits are felt");
+                changed |= sliderFloat("Screen shake", &draft.screenShake, 0.0f, 1.0f, "%.2f");
+                changed |= sliderFloat("Hit stop", &draft.hitStopMs, 0.0f, 250.0f, "%.0f ms");
+            }
+            break;
+        }
+    }
+
+    if (changed) actions.dispatch(core::action::UpdateCombat{draft});
+}
+
+}  // namespace ui
+######## END FILE ########
+
+// [20/25]
+######## FILE: src/ui/pages/PlayerPage.cpp ########
+#include "ui/pages/Page.h"
+
+#include "ui/Theme.h"
+#include "ui/Widgets.h"
+
+#include <array>
+
+namespace ui {
+
+namespace {
+constexpr std::array kSections{"Stats", "Movement", "Camera"};
+}
+
+std::span<const char* const> PlayerPage::sections() const { return kSections; }
+
+void PlayerPage::draw(int section, const core::AppState& state, core::ActionSink& actions) {
+    using namespace widgets;
+    const auto& pal = theme::palette();
+
+    core::PlayerSettings draft = state.player;
+    bool changed = false;
+
+    CardGrid grid("##player");
+    switch (section) {
+        case 0: {
+            {
+                Card card("Vitals");
+                statBar("Health", draft.health, draft.maxHealth, pal.success);
+                statBar("Stamina", draft.stamina, draft.maxStamina, pal.warning);
+                ImGui::Spacing();
+                if (button("Restore", ButtonKind::Primary)) actions.dispatch(core::action::HealPlayer{});
+                ImGui::SameLine();
+                if (button("Reset player", ButtonKind::Danger)) actions.dispatch(core::action::ResetPlayer{});
+            }
+            {
+                Card card("Character");
+                changed |= combo("Class", &draft.playerClass, core::kPlayerClasses);
+                changed |= sliderInt("Level", &draft.level, 1, 100);
+            }
+            grid.next();
+            {
+                Card card("Modifiers", "Debug switches for testing");
+                changed |= toggle("God mode", &draft.godMode, "Ignore all incoming damage");
+                changed |= toggle("Infinite stamina", &draft.infiniteStamina);
+                changed |= toggle("Health regeneration", &draft.healthRegen, "Restore 1.5 HP per second");
+            }
+            break;
+        }
+        case 1: {
+            {
+                Card card("Speed");
+                changed |= sliderFloat("Move speed", &draft.moveSpeed, 0.25f, 3.0f, "%.2fx");
+                changed |= sliderFloat("Sprint multiplier", &draft.sprintMultiplier, 1.0f, 3.0f, "%.1fx");
+                changed |= sliderFloat("Jump height", &draft.jumpHeight, 0.5f, 3.0f, "%.1fx");
+            }
+            grid.next();
+            {
+                Card card("Behaviour");
+                changed |= checkbox("Auto sprint", &draft.autoSprint, "Sprint whenever stamina is above 50%");
+                changed |= checkbox("Fly mode", &draft.flyMode, "Free movement, ignores collision");
+            }
+            break;
+        }
+        default: {
+            {
+                Card card("View");
+                changed |= combo("Camera mode", &draft.cameraMode, core::kCameraModes);
+                changed |= sliderFloat("Field of view", &draft.fov, 60.0f, 120.0f, "%.0f°");
+            }
+            grid.next();
+            {
+                Card card("Input");
+                changed |= sliderFloat("Sensitivity", &draft.sensitivity, 0.1f, 5.0f, "%.2f");
+                changed |= checkbox("Invert Y axis", &draft.invertY);
+                changed |= checkbox("Head bob", &draft.headBob);
+            }
+            break;
+        }
+    }
+
+    if (changed) actions.dispatch(core::action::UpdatePlayer{draft});
+}
+
+}  // namespace ui
+######## END FILE ########
+
+// [21/25]
+######## FILE: src/ui/pages/InventoryPage.cpp ########
+#define IMGUI_DEFINE_MATH_OPERATORS
+#include "ui/pages/Page.h"
+
+#include "ui/Theme.h"
+#include "ui/Widgets.h"
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <string_view>
+
+namespace ui {
+
+namespace {
+
+constexpr std::array kSections{"Items", "Loot rules"};
+constexpr std::array kCategoryFilter{"All categories", "Weapon", "Armor", "Consumable", "Material", "Quest"};
+
+bool containsIgnoreCase(std::string_view haystack, std::string_view needle) {
+    if (needle.empty()) return true;
+    const auto it = std::ranges::search(haystack, needle, [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+    });
+    return !it.empty();
+}
+
+const char* useLabel(const core::Item& item) {
+    switch (item.category) {
+        case core::ItemCategory::Weapon:
+        case core::ItemCategory::Armor: return item.equipped ? "Unequip" : "Equip";
+        case core::ItemCategory::Consumable: return "Use";
+        default: return nullptr;
+    }
+}
+
+}  // namespace
+
+std::span<const char* const> InventoryPage::sections() const { return kSections; }
+
+void InventoryPage::draw(int section, const core::AppState& state, core::ActionSink& actions) {
+    if (section == 0) drawItems(state, actions);
+    else drawLootRules(state, actions);
+}
+
+void InventoryPage::drawItems(const core::AppState& state, core::ActionSink& actions) {
+    using namespace widgets;
+    const auto& pal = theme::palette();
+    const auto& inv = state.inventory;
+    const float s = ImGui::GetIO().FontGlobalScale;
+
+    Card card("Backpack", "Use, equip or drop items. Quest items are protected.");
+
+    // ---- Toolbar ----
+    ImGui::SetNextItemWidth(200.0f * s);
+    ImGui::InputTextWithHint("##search", "Search items...", m_search, sizeof m_search);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(150.0f * s);
+    ImGui::Combo("##category", &m_categoryFilter, kCategoryFilter.data(), static_cast<int>(kCategoryFilter.size()));
+    ImGui::SameLine();
+
+    core::InventoryPrefs prefs = inv.prefs;
+    ImGui::SetNextItemWidth(120.0f * s);
+    bool prefsChanged = ImGui::Combo("##sort", &prefs.sortMode, core::kSortModes.data(), static_cast<int>(core::kSortModes.size()));
+    ImGui::SetItemTooltip("Sort by");
+    ImGui::SameLine();
+    if (button(prefs.sortDescending ? "Desc" : "Asc")) {
+        prefs.sortDescending = !prefs.sortDescending;
+        prefsChanged = true;
+    }
+    if (prefsChanged) actions.dispatch(core::action::UpdateInventoryPrefs{prefs});
+
+    const char* lootLabel = "+ Loot random item";
+    const float lootW = ImGui::CalcTextSize(lootLabel).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImGui::SameLine(0, 0);
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + ImGui::GetStyle().ItemSpacing.x,
+                                  ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - lootW));
+    if (button(lootLabel, ButtonKind::Primary)) actions.dispatch(core::action::SpawnRandomItem{});
+
+    ImGui::Spacing();
+    const float weight = core::totalWeight(inv);
+    statBar("Carry weight (kg)", weight, inv.maxWeight, weight > inv.maxWeight * 0.85f ? pal.danger : pal.accent);
+    ImGui::Spacing();
+
+    // ---- Table ----
+    constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                                       ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
+    if (ImGui::BeginTable("##items", 6, kFlags)) {
+        ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthStretch, 3.0f);
+        ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("Rarity", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("Qty", ImGuiTableColumnFlags_WidthStretch, 0.7f);
+        ImGui::TableSetupColumn("Weight", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed, 160.0f * s);
+        ImGui::TableHeadersRow();
+
+        int shown = 0;
+        for (const core::Item& item : inv.items) {
+            if (m_categoryFilter > 0 && static_cast<int>(item.category) != m_categoryFilter - 1) continue;
+            if (!containsIgnoreCase(item.name, m_search)) continue;
+            ++shown;
+
+            ImGui::PushID(item.id);
+            ImGui::TableNextRow(ImGuiTableRowFlags_None, ImGui::GetFrameHeightWithSpacing());
+            const ImVec4 rarity = theme::rarityColor(item.rarity);
+
+            ImGui::TableNextColumn();
+            {
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const float h = ImGui::GetFrameHeight();
+                ImGui::GetWindowDrawList()->AddCircleFilled(p + ImVec2{4.0f * s, h * 0.5f}, 4.0f * s,
+                                                            ImGui::ColorConvertFloat4ToU32(rarity));
+                ImGui::SetCursorScreenPos(p + ImVec2{14.0f * s, 0});
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(item.name.c_str());
+                if (item.equipped) {
+                    ImGui::SameLine();
+                    badge("Equipped", pal.accent);
+                }
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(pal.textMuted, "%s", core::kItemCategoryNames[static_cast<std::size_t>(item.category)]);
+
+            ImGui::TableNextColumn();
+            badge(core::kRarityNames[static_cast<std::size_t>(item.rarity)], rarity);
+
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("x%d", item.quantity);
+
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(pal.textMuted, "%.1f kg", item.weight * static_cast<float>(item.quantity));
+
+            ImGui::TableNextColumn();
+            if (const char* label = useLabel(item)) {
+                if (button(label, ButtonKind::Secondary, {80.0f * s, 0})) actions.dispatch(core::action::UseItem{item.id});
+                ImGui::SameLine();
+            }
+            if (button("Drop", ButtonKind::Danger)) {
+                if (inv.prefs.confirmDrop) m_pendingDropId = item.id;
+                else actions.dispatch(core::action::DropItem{item.id});
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+
+        if (shown == 0) caption("No items match the current filter.");
+    }
+
+    // ---- Confirmation modal (opened outside the per-row ID scope) ----
+    if (m_pendingDropId != -1 && !ImGui::IsPopupOpen("Drop item?")) ImGui::OpenPopup("Drop item?");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
+    if (ImGui::BeginPopupModal("Drop item?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        const auto it = std::ranges::find(inv.items, m_pendingDropId, &core::Item::id);
+        if (it == inv.items.end()) {
+            m_pendingDropId = -1;
+            ImGui::CloseCurrentPopup();
+        } else {
+            ImGui::Text("Drop %s x%d?", it->name.c_str(), it->quantity);
+            caption("Dropped items are gone for good.");
+            ImGui::Spacing();
+            if (button("Drop", ButtonKind::Danger, {110.0f * s, 0})) {
+                actions.dispatch(core::action::DropItem{m_pendingDropId});
+                m_pendingDropId = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (button("Cancel", ButtonKind::Secondary, {110.0f * s, 0}) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                m_pendingDropId = -1;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void InventoryPage::drawLootRules(const core::AppState& state, core::ActionSink& actions) {
+    using namespace widgets;
+
+    core::InventoryPrefs prefs = state.inventory.prefs;
+    bool changed = false;
+
+    CardGrid grid("##loot");
+    {
+        Card card("Pickup");
+        changed |= toggle("Auto loot", &prefs.autoLoot, "Collect drops when walking over them");
+        changed |= combo("Loot filter", &prefs.lootFilter, core::kLootFilters);
+        changed |= checkbox("Sort on pickup", &prefs.autoSortOnPickup);
+    }
+    grid.next();
+    {
+        Card card("Organisation");
+        changed |= combo("Sort by", &prefs.sortMode, core::kSortModes);
+        changed |= checkbox("Descending order", &prefs.sortDescending);
+        changed |= checkbox("Confirm before dropping", &prefs.confirmDrop);
+        ImGui::Spacing();
+        if (button("Sort now", ButtonKind::Primary)) actions.dispatch(core::action::SortInventory{});
+    }
+
+    if (changed) actions.dispatch(core::action::UpdateInventoryPrefs{prefs});
+}
+
+}  // namespace ui
+######## END FILE ########
+
+// [22/25]
+######## FILE: src/ui/pages/ExplorerPage.cpp ########
+#include "ui/pages/Page.h"
+
+#include "ui/Theme.h"
+#include "ui/Widgets.h"
+
+#include <algorithm>
+#include <array>
+
+namespace ui {
+
+namespace {
+
+constexpr std::array kSections{"Locations", "World"};
+
+const char* dayPhase(float hours) {
+    if (hours < 5.0f) return "Night";
+    if (hours < 8.0f) return "Dawn";
+    if (hours < 17.0f) return "Day";
+    if (hours < 20.0f) return "Dusk";
+    return "Night";
+}
+
+}  // namespace
+
+std::span<const char* const> ExplorerPage::sections() const { return kSections; }
+
+void ExplorerPage::draw(int section, const core::AppState& state, core::ActionSink& actions) {
+    if (section == 0) drawLocations(state, actions);
+    else drawWorld(state, actions);
+}
+
+void ExplorerPage::drawLocations(const core::AppState& state, core::ActionSink& actions) {
+    using namespace widgets;
+    const auto& pal = theme::palette();
+    const auto& ex = state.explorer;
+    if (ex.locations.empty()) return;
+
+    m_selected = std::clamp(m_selected, 0, static_cast<int>(ex.locations.size()) - 1);
+    const core::Vec3& here = ex.locations[static_cast<std::size_t>(ex.currentLocation)].position;
+
+    CardGrid grid("##explorer", 300.0f);
+    {
+        Card card("Known locations", "Double-click to travel. Your location is highlighted.");
+        checkbox("Only discovered", &m_onlyDiscovered);
+
+        constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp;
+        if (ImGui::BeginTable("##locations", 3, kFlags)) {
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.2f);
+            ImGui::TableSetupColumn("Region", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+            ImGui::TableSetupColumn("Distance", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+            ImGui::TableHeadersRow();
+
+            for (int i = 0; i < static_cast<int>(ex.locations.size()); ++i) {
+                const core::Location& loc = ex.locations[static_cast<std::size_t>(i)];
+                if (m_onlyDiscovered && !loc.discovered) continue;
+
+                ImGui::PushID(i);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+
+                const bool isHere = i == ex.currentLocation;
+                ImGui::PushStyleColor(ImGuiCol_Text, isHere ? pal.accent : loc.discovered ? pal.text : pal.textDisabled);
+                const char* name = loc.discovered ? loc.name.c_str() : "???";
+                if (ImGui::Selectable(name, m_selected == i, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
+                    m_selected = i;
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) actions.dispatch(core::action::TeleportTo{i});
+                }
+                ImGui::PopStyleColor();
+                if (isHere) ImGui::SetItemTooltip("You are here");
+
+                ImGui::TableNextColumn();
+                ImGui::TextColored(pal.textMuted, "%s", loc.region.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextColored(pal.textMuted, "%.0f m", core::distance(here, loc.position));
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+    }
+    grid.next();
+    {
+        const core::Location& loc = ex.locations[static_cast<std::size_t>(m_selected)];
+        const bool isHere = m_selected == ex.currentLocation;
+
+        Card card("Details");
+        ImGui::PushFont(theme::fonts().heading);
+        ImGui::TextUnformatted(loc.discovered ? loc.name.c_str() : "Undiscovered");
+        ImGui::PopFont();
+        caption(loc.region.c_str());
+        ImGui::Spacing();
+
+        if (isHere) badge("Current location", pal.accent);
+        else if (loc.discovered) badge("Discovered", pal.success);
+        else badge("Hidden", pal.warning);
+
+        ImGui::Spacing();
+        ImGui::TextColored(pal.textMuted, "Coordinates");
+        ImGui::Text("%.0f, %.0f, %.0f", loc.position.x, loc.position.y, loc.position.z);
+        ImGui::TextColored(pal.textMuted, "Distance");
+        ImGui::Text("%.0f m", core::distance(here, loc.position));
+        ImGui::Spacing();
+
+        ImGui::BeginDisabled(!loc.discovered || isHere);
+        if (button("Fast travel", ButtonKind::Primary)) actions.dispatch(core::action::TeleportTo{m_selected});
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (button("Reveal all")) actions.dispatch(core::action::RevealAllLocations{});
+    }
+}
+
+void ExplorerPage::drawWorld(const core::AppState& state, core::ActionSink& actions) {
+    using namespace widgets;
+    const auto& pal = theme::palette();
+
+    core::WorldSettings draft = state.explorer.world;
+    bool changed = false;
+
+    CardGrid grid("##world");
+    {
+        Card card("Time of day");
+        const int hours = static_cast<int>(draft.timeOfDay);
+        const int minutes = static_cast<int>((draft.timeOfDay - static_cast<float>(hours)) * 60.0f);
+        ImGui::PushFont(theme::fonts().heading);
+        ImGui::Text("%02d:%02d", hours, minutes);
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(pal.textMuted, "%s", dayPhase(draft.timeOfDay));
+
+        changed |= sliderFloat("Time", &draft.timeOfDay, 0.0f, 23.99f, "%.1f h");
+        changed |= checkbox("Freeze time", &draft.freezeTime);
+        ImGui::BeginDisabled(draft.freezeTime);
+        changed |= sliderFloat("Time scale", &draft.timeScale, 1.0f, 600.0f, "%.0f min/s");
+        ImGui::EndDisabled();
+    }
+    {
+        Card card("Minimap");
+        changed |= toggle("Show minimap", &draft.showMinimap);
+        ImGui::BeginDisabled(!draft.showMinimap);
+        changed |= sliderFloat("Zoom", &draft.minimapZoom, 0.5f, 4.0f, "%.1fx");
+        ImGui::EndDisabled();
+    }
+    grid.next();
+    {
+        Card card("Environment");
+        changed |= combo("Weather", &draft.weather, core::kWeatherTypes);
+        changed |= toggle("Fog of war", &draft.fogOfWar, "Hide unexplored areas on the map");
+        changed |= sliderFloat("Render distance", &draft.renderDistance, 100.0f, 3000.0f, "%.0f m");
+    }
+
+    if (changed) actions.dispatch(core::action::UpdateWorld{draft});
+}
+
+}  // namespace ui
+######## END FILE ########
+
+// [23/25]
+######## FILE: src/ui/pages/SettingsPage.cpp ########
+#include "ui/pages/Page.h"
+
+#include "ui/Theme.h"
+#include "ui/Widgets.h"
+
+#include <array>
+
+namespace ui {
+
+namespace {
+
+constexpr std::array kSections{"Appearance", "General", "About"};
+
+ImVec4 levelColor(core::LogLevel level) {
+    const auto& pal = theme::palette();
+    switch (level) {
+        case core::LogLevel::Success: return pal.success;
+        case core::LogLevel::Warning: return pal.warning;
+        case core::LogLevel::Error: return pal.danger;
+        default: return pal.textMuted;
+    }
+}
+
+}  // namespace
+
+std::span<const char* const> SettingsPage::sections() const { return kSections; }
+
+void SettingsPage::draw(int section, const core::AppState& state, core::ActionSink& actions) {
+    switch (section) {
+        case 0: drawAppearance(state, actions); break;
+        case 1: drawGeneral(state, actions); break;
+        default: drawAbout(state, actions); break;
+    }
+}
+
+void SettingsPage::drawAppearance(const core::AppState& state, core::ActionSink& actions) {
+    using namespace widgets;
+
+    core::AppearanceSettings draft = state.settings.appearance;
+    bool changed = false;
+
+    CardGrid grid("##appearance");
+    {
+        Card card("Accent colour", "Used for highlights, sliders and the active tab");
+        std::array<ImVec4, core::kAccentNames.size()> swatches{};
+        for (int i = 0; i < static_cast<int>(swatches.size()); ++i) swatches[static_cast<std::size_t>(i)] = theme::accentPreset(i);
+        changed |= colorSwatches("##accent", swatches, draft.accent);
+        caption(core::kAccentNames[static_cast<std::size_t>(draft.accent)]);
+    }
+    {
+        Card card("Interface");
+        float scale = m_scaleDraft >= 0.0f ? m_scaleDraft : draft.uiScale;
+        if (sliderFloat("UI scale", &scale, 0.75f, 1.75f, "%.2fx")) m_scaleDraft = scale;
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            draft.uiScale = scale;
+            m_scaleDraft = -1.0f;
+            changed = true;
+        }
+        changed |= sliderFloat("Corner radius", &draft.rounding, 0.0f, 16.0f, "%.0f px");
+        changed |= toggle("Animations", &draft.animations, "Smooth transitions for tabs and switches");
+    }
+    grid.next();
+    {
+        Card card("Preview");
+        button("Primary", ButtonKind::Primary);
+        ImGui::SameLine();
+        button("Secondary");
+        ImGui::SameLine();
+        button("Danger", ButtonKind::Danger);
+        checkbox("Checkbox", &m_previewCheck);
+        toggle("Toggle", &m_previewCheck);
+        sliderFloat("Slider", &m_previewSlider, 0.0f, 1.0f);
+        ImGui::ProgressBar(m_previewSlider, {-FLT_MIN, 0});
+    }
+
+    if (changed) actions.dispatch(core::action::UpdateAppearance{draft});
+}
+
+void SettingsPage::drawGeneral(const core::AppState& state, core::ActionSink& actions) {
+    using namespace widgets;
+
+    core::GeneralSettings draft = state.settings.general;
+    bool changed = false;
+
+    CardGrid grid("##general");
+    {
+        Card card("Application");
+        changed |= combo("Language", &draft.language, core::kLanguages);
+        changed |= checkbox("Vertical sync", &draft.vsync, "Match the monitor refresh rate");
+        ImGui::BeginDisabled(draft.vsync);
+        changed |= combo("FPS limit", &draft.fpsLimit, core::kFpsLimits);
+        ImGui::EndDisabled();
+        changed |= toggle("FPS overlay", &draft.showFpsOverlay);
+    }
+    grid.next();
+    {
+        Card card("Safety");
+        changed |= checkbox("Confirm destructive actions", &draft.confirmDestructive);
+        ImGui::Spacing();
+        if (button("Restore defaults", ButtonKind::Danger)) {
+            if (draft.confirmDestructive) m_confirmReset = true;
+            else actions.dispatch(core::action::ResetAllSettings{});
+        }
+        caption("Resets combat, world, loot and application settings.");
+    }
+
+    if (changed) actions.dispatch(core::action::UpdateGeneral{draft});
+
+    if (m_confirmReset && !ImGui::IsPopupOpen("Restore defaults?")) ImGui::OpenPopup("Restore defaults?");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
+    if (ImGui::BeginPopupModal("Restore defaults?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("All settings will be reset. Continue?");
+        ImGui::Spacing();
+        const float w = 120.0f * ImGui::GetIO().FontGlobalScale;
+        if (button("Reset", ButtonKind::Danger, {w, 0})) {
+            actions.dispatch(core::action::ResetAllSettings{});
+            m_confirmReset = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (button("Cancel", ButtonKind::Secondary, {w, 0}) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            m_confirmReset = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void SettingsPage::drawAbout(const core::AppState& state, core::ActionSink& actions) {
+    using namespace widgets;
+    const auto& pal = theme::palette();
+
+    CardGrid grid("##about", 260.0f);
+    {
+        Card card("About");
+        ImGui::TextUnformatted("Nova Panel 1.0");
+        ImGui::TextColored(pal.textMuted, "Dear ImGui %s", IMGUI_VERSION);
+        ImGui::Spacing();
+        caption("Views render a read-only snapshot of the state and emit actions. "
+                "The controller is the only component that changes the state.");
+    }
+    grid.next();
+    {
+        Card card("Activity log");
+        if (button("Clear")) actions.dispatch(core::action::ClearLog{});
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(pal.textMuted, "%zu entries", state.log.size());
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, pal.background);
+        ImGui::BeginChild("##log", {0, 220.0f * ImGui::GetIO().FontGlobalScale}, ImGuiChildFlags_AlwaysUseWindowPadding);
+        for (auto it = state.log.rbegin(); it != state.log.rend(); ++it) {
+            ImGui::TextColored(pal.textDisabled, "%7.1fs", it->timestamp);
+            ImGui::SameLine();
+            ImGui::TextColored(levelColor(it->level), "%s", it->message.c_str());
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+}
+
+}  // namespace ui
+######## END FILE ########
+
+// [24/25]
+######## FILE: tests/smoke_test.cpp ########
+// Headless tests: controller logic without any UI, then the full UI rendered
+// for every page/section without a GPU (ImGui only builds draw lists).
+
+#include "app/Application.h"
+#include "core/Controller.h"
+#include "ui/Theme.h"
+
+#include <imgui.h>
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+
+namespace {
+
+int g_failures = 0;
+
+#define CHECK(expr)                                                              \
+    do {                                                                         \
+        if (!(expr)) {                                                           \
+            std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #expr); \
+            ++g_failures;                                                        \
+        }                                                                        \
+    } while (0)
+
+void testController() {
+    core::AppState state = core::makeDemoState();
+    core::Controller controller(state);
+    using namespace core::action;
+
+    // Values are validated before being committed.
+    core::CombatSettings combat = state.combat;
+    combat.attackSpeed = 99.0f;
+    combat.difficulty = 42;
+    controller.handle(UpdateCombat{combat});
+    CHECK(state.combat.attackSpeed == 3.0f);
+    CHECK(state.combat.difficulty == static_cast<int>(core::kDifficulties.size()) - 1);
+
+    // Consumables heal and are consumed.
+    state.player.health = 10.0f;
+    const auto potion = std::ranges::find(state.inventory.items, std::string("Health Potion"), &core::Item::name);
+    CHECK(potion != state.inventory.items.end());
+    const int potionId = potion->id, potionQty = potion->quantity;
+    controller.handle(UseItem{potionId});
+    CHECK(state.player.health > 10.0f);
+    CHECK(std::ranges::find(state.inventory.items, potionId, &core::Item::id)->quantity == potionQty - 1);
+
+    // Quest items can't be dropped, others can.
+    const auto quest = std::ranges::find(state.inventory.items, core::ItemCategory::Quest, &core::Item::category);
+    const std::size_t count = state.inventory.items.size();
+    controller.handle(DropItem{quest->id});
+    CHECK(state.inventory.items.size() == count);
+    controller.handle(DropItem{potionId});
+    CHECK(state.inventory.items.size() == count - 1);
+
+    // Only discovered locations are reachable.
+    const auto hidden = std::ranges::find(state.explorer.locations, false, &core::Location::discovered);
+    const int hiddenIndex = static_cast<int>(hidden - state.explorer.locations.begin());
+    controller.handle(TeleportTo{hiddenIndex});
+    CHECK(state.explorer.currentLocation == 0);
+    controller.handle(RevealAllLocations{});
+    controller.handle(TeleportTo{hiddenIndex});
+    CHECK(state.explorer.currentLocation == hiddenIndex);
+
+    // Appearance changes are broadcast.
+    int notified = 0;
+    controller.onAppearanceChanged = [&](const core::AppearanceSettings&) { ++notified; };
+    core::AppearanceSettings appearance = state.settings.appearance;
+    appearance.accent = 2;
+    controller.handle(UpdateAppearance{appearance});
+    controller.handle(UpdateAppearance{appearance});  // unchanged -> no notification
+    CHECK(notified == 1);
+
+    // Time advances unless frozen.
+    const float t0 = state.explorer.world.timeOfDay;
+    controller.tick(1.0f);
+    CHECK(state.explorer.world.timeOfDay != t0);
+    state.explorer.world.freezeTime = true;
+    const float t1 = state.explorer.world.timeOfDay;
+    controller.tick(1.0f);
+    CHECK(state.explorer.world.timeOfDay == t1);
+}
+
+void renderFrame(app::Application& application) {
+    ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    application.frame(1.0f / 60.0f);
+    ImGui::Render();
+}
+
+void testUi() {
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = {1280, 800};
+    ui::theme::loadFonts(io);
+    io.Fonts->Build();
+
+    {
+        app::Application application;
+
+        // Every page and every pill section renders.
+        for (int p = 0; p < static_cast<int>(ui::PageId::Count); ++p) {
+            application.window().setActivePage(static_cast<ui::PageId>(p));
+            for (int section = 0; section < 3; ++section) {
+                application.window().setActiveSection(section);
+                for (int i = 0; i < 3; ++i) renderFrame(application);
+                CHECK(ImGui::GetDrawData()->TotalVtxCount > 0);
+            }
+        }
+
+        // Narrow window -> single-column layout still works.
+        io.DisplaySize = {560, 700};
+        for (int i = 0; i < 3; ++i) renderFrame(application);
+        io.DisplaySize = {1280, 800};
+
+        // Clicking the third sidebar icon navigates to Inventory.
+        application.window().setActivePage(ui::PageId::Combat);
+        renderFrame(application);
+        io.AddMousePosEvent(39.0f, 205.0f);
+        renderFrame(application);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+        renderFrame(application);
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        renderFrame(application);
+        CHECK(application.window().activePage() == ui::PageId::Inventory);
+    }
+
+    ImGui::DestroyContext();
+}
+
+}  // namespace
+
+int main() {
+    testController();
+    testUi();
+    if (g_failures == 0) std::puts("All checks passed");
+    return g_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+######## END FILE ########
+
+// [25/25]
+######## FILE: README.md ########
+# Nova Panel — современный интерфейс на Dear ImGui (C++20)
+
+Тёмная тема, боковая панель с векторными иконками, вкладки-«пилюли» с анимированным
+переключением и пять разделов: **Combat, Player, Inventory, Explorer, Settings**.
+
+## Сборка
+
+Нужны CMake ≥ 3.20, компилятор с C++20 (GCC 13+, Clang 16+, MSVC 2022) и OpenGL.
+ImGui (v1.91.9) скачивается автоматически; GLFW берётся из системы, а если его нет — тоже скачивается.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/nova_panel
+```
+
+Тесты работают без окна и без GPU:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+## Архитектура
+
+```
+src/
+├── core/                 ← модель и логика, НЕ зависят от ImGui
+│   ├── AppState.h/.cpp   данные: настройки, предметы, локации, журнал
+│   ├── Actions.h         std::variant всех действий + ActionQueue
+│   └── Controller.h/.cpp единственное место, где меняется AppState
+├── ui/                   ← только отрисовка
+│   ├── Theme.h/.cpp      палитра, ImGuiStyle, шрифты
+│   ├── Icons.h/.cpp      векторные иконки через ImDrawList
+│   ├── Widgets.h/.cpp    toggle, pillTabs, sidebarButton, Card, CardGrid…
+│   ├── MainWindow.h/.cpp сайдбар + заголовок + пилюли + контент + статус-бар
+│   └── pages/            по одному классу на вкладку (интерфейс Page)
+├── app/Application.*     связывает core и ui, задаёт порядок кадра
+└── main.cpp              платформа: GLFW + OpenGL3
+```
+
+Поток данных за кадр (однонаправленный):
+
+```
+Controller::tick(dt) ──► MainWindow::draw(const AppState&, ActionSink&) ──► Controller::process(queue)
+     симуляция              чтение состояния, намерения → actions          применение + валидация
+```
+
+* **Страницы только читают** `const core::AppState&`. Чтобы что-то поменять, страница
+  правит *черновик* (копию блока настроек) и отправляет `action::UpdateCombat{draft}`
+  либо команду (`UseItem`, `TeleportTo`, `ResetAllSettings`, …).
+* **Controller** проверяет и ограничивает значения (`std::clamp`), реализует
+  бизнес-правила (квестовые предметы нельзя выбросить, в неоткрытую локацию нельзя
+  переместиться, зелья лечат игрока), пишет журнал событий.
+* Действия копятся в `ActionQueue` и применяются **после** отрисовки, поэтому
+  весь кадр видит согласованное состояние.
+* Чисто визуальное состояние (строка поиска, выбранная пилюля, открытый модальный диалог)
+  живёт во view — в доменную модель оно не попадает.
+* Смена темы идёт через наблюдатель `Controller::onAppearanceChanged` → `theme::apply()`.
+
+Добавить новую вкладку: класс-наследник `ui::Page` в `src/ui/pages/`, новый `PageId`
+и строка в конструкторе `MainWindow`.
+
+## Параметры стиля (`ui::theme::apply`)
+
+| Параметр | Значение | | Цвет | Значение |
+|---|---|---|---|---|
+| `WindowRounding` | radius + 4 | | `WindowBg` | `#0D0E12` |
+| `ChildRounding` | radius + 2 | | сайдбар | `#111217` |
+| `FrameRounding`, `GrabRounding`, `PopupRounding`, `TabRounding` | radius (8 по умолчанию) | | `ChildBg` (карточки) | `#17181E` |
+| `ScrollbarRounding` | 12 | | `FrameBg` | `#21222A` |
+| `WindowPadding` | 18 × 16 | | `FrameBgHovered` | `#2B2D37` |
+| `FramePadding` | 10 × 6 | | `Text` / приглушённый | `#ECEEF3` / `#8A8FA0` |
+| `ItemSpacing` | 10 × 9 | | акцент (по умолчанию) | `#7C5CFF` |
+| `ScrollbarSize` / `GrabMinSize` | 10 / 12 | | success / warning / danger | `#3DD68C` / `#F5B544` / `#F2555A` |
+| `FrameBorderSize` / `ChildBorderSize` | 0 / 1 | | `Border` | белый, 6 % |
+
+Акцент (Violet, Azure, Emerald, Amber, Rose), радиус скругления, масштаб UI и анимации
+меняются на вкладке **Settings → Appearance** прямо во время работы.
+
+Шрифт выбирается автоматически (Segoe UI / Arial / Noto Sans / DejaVu Sans). Чтобы
+получить задуманный вид, положите `Inter-Regular.ttf` и `Inter-SemiBold.ttf` в `assets/fonts/`.
+######## END FILE ########
